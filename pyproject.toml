@@ -13,6 +13,7 @@ dependencies = [
     "scipy",
     "pandas",
     "matplotlib",
+    "ipywidgets",
     "plotly",
     "seaborn",
     "h5py",
@@ -24,6 +25,9 @@ dependencies = [
     "tqdm",
     "pydantic",
 ]
+
+[project.scripts]
+acute-slice-mea = "acute_slice_mea.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
