@@ -50,6 +50,8 @@ class AnalysisConfig:
     apply_spike_common_reference: bool = True
     lfp_filter_margin_ms: int = 10000
     lfp_ignore_low_freq_error: bool = True
+    n_jobs: int = 1
+    channel_chunk_size: int | None = None
 
 
 def run_analysis(config: AnalysisConfig) -> dict:
@@ -90,6 +92,8 @@ def run_analysis(config: AnalysisConfig) -> dict:
         step_sec=config.lfp_step_sec,
         bands=DEFAULT_LFP_BANDS,
         welch_segment_sec=config.welch_segment_sec,
+        n_jobs=config.n_jobs,
+        channel_chunk_size=config.channel_chunk_size,
     )
     preview_electrode_ids = config.preview_electrode_ids
     if preview_electrode_ids is None and config.preview_max_electrodes is not None:
@@ -100,6 +104,8 @@ def run_analysis(config: AnalysisConfig) -> dict:
         duration_sec=config.spectrum_duration_sec,
         max_freq_hz=config.spectrum_max_freq_hz,
         welch_segment_sec=config.welch_segment_sec,
+        n_jobs=config.n_jobs,
+        channel_chunk_size=config.channel_chunk_size,
     )
     trace_preview = compute_trace_preview(
         recordings,

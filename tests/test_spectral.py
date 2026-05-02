@@ -1,4 +1,6 @@
 import numpy as np
+import pandas as pd
+import pytest
 
 from acute_slice_mea.spectral import (
     DEFAULT_LFP_BANDS,
@@ -110,3 +112,76 @@ def test_welch_spectrum_summary_returns_frequency_axis_and_percentiles():
     assert summary["p05_psd"].shape == summary["freq_hz"].shape
     assert summary["p95_psd"].shape == summary["freq_hz"].shape
     assert len(summary["dominant_freq_hz"]) == 3
+
+
+def test_lfp_band_power_parallel_matches_serial_and_preserves_order():
+    fs = 100.0
+    t = np.arange(0, 20, 1 / fs)
+    traces = np.column_stack(
+        [
+            np.sin(2 * np.pi * 2 * t),
+            np.sin(2 * np.pi * 10 * t),
+            np.sin(2 * np.pi * 35 * t),
+        ]
+    )
+    recording = FakeRecording(traces, fs=fs, channel_ids=["ch0", "ch1", "ch2"])
+
+    serial = compute_lfp_band_power_over_time(
+        recording,
+        start_sec=0,
+        end_sec=20,
+        window_sec=10,
+        step_sec=5,
+        bands=DEFAULT_LFP_BANDS,
+        n_jobs=1,
+    )
+    parallel = compute_lfp_band_power_over_time(
+        recording,
+        start_sec=0,
+        end_sec=20,
+        window_sec=10,
+        step_sec=5,
+        bands=DEFAULT_LFP_BANDS,
+        n_jobs=2,
+        channel_chunk_size=1,
+    )
+
+    pd.testing.assert_frame_equal(parallel, serial)
+    assert parallel["channel_id"].tolist() == serial["channel_id"].tolist()
+
+
+def test_welch_spectrum_summary_parallel_matches_serial_and_preserves_channel_order():
+    fs = 100.0
+    t = np.arange(0, 5, 1 / fs)
+    traces = np.column_stack(
+        [
+            np.sin(2 * np.pi * 8 * t),
+            np.sin(2 * np.pi * 20 * t),
+            np.sin(2 * np.pi * 35 * t),
+        ]
+    )
+    recording = FakeRecording(traces, fs=fs, channel_ids=["ch0", "ch1", "ch2"])
+
+    serial = compute_welch_spectrum_summary(recording, duration_sec=5, max_freq_hz=40, n_jobs=1)
+    parallel = compute_welch_spectrum_summary(
+        recording,
+        duration_sec=5,
+        max_freq_hz=40,
+        n_jobs=2,
+        channel_chunk_size=1,
+    )
+
+    assert list(parallel["channel_ids"]) == ["ch0", "ch1", "ch2"]
+    assert parallel.keys() == serial.keys()
+    for key in serial:
+        np.testing.assert_equal(parallel[key], serial[key])
+
+
+def test_parallel_options_reject_invalid_values():
+    recording = FakeRecording(np.zeros((100, 2)), fs=100.0)
+
+    with pytest.raises(ValueError, match="n_jobs"):
+        compute_lfp_band_power_over_time(recording, n_jobs=0)
+
+    with pytest.raises(ValueError, match="channel_chunk_size"):
+        compute_welch_spectrum_summary(recording, channel_chunk_size=0)

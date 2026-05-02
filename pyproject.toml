@@ -19,6 +19,7 @@ dependencies = [
     "h5py",
     "spikeinterface",
     "scikit-learn",
+    "joblib",
     "xarray",
     "networkx",
     "zarr",

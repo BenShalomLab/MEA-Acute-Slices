@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+from math import ceil
+
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed, effective_n_jobs
 from scipy import signal
 
 from acute_slice_mea.electrodes import recorded_electrode_channels
@@ -46,6 +49,44 @@ def _resolve_channels(recording, electrode_table=None, electrode_ids=None):
     return recorded_electrode_channels(electrode_table, electrode_ids)
 
 
+def _validate_parallel_options(n_jobs, channel_chunk_size):
+    n_jobs = int(n_jobs)
+    if n_jobs == 0:
+        raise ValueError("n_jobs must be non-zero. Use 1 for serial or -1 for all available cores.")
+    if channel_chunk_size is not None:
+        channel_chunk_size = int(channel_chunk_size)
+        if channel_chunk_size <= 0:
+            raise ValueError("channel_chunk_size must be positive when provided.")
+    return n_jobs, channel_chunk_size
+
+
+def _resolve_channel_chunk_size(num_channels, n_jobs, channel_chunk_size):
+    if channel_chunk_size is not None:
+        return channel_chunk_size
+    if n_jobs == 1:
+        return max(1, num_channels)
+    worker_count = max(1, effective_n_jobs(n_jobs))
+    return max(1, ceil(num_channels / worker_count))
+
+
+def _channel_chunks(electrode_ids, channel_ids, n_jobs, channel_chunk_size):
+    chunk_size = _resolve_channel_chunk_size(len(channel_ids), n_jobs, channel_chunk_size)
+    chunks = []
+    for start in range(0, len(channel_ids), chunk_size):
+        end = start + chunk_size
+        chunks.append((list(electrode_ids[start:end]), list(channel_ids[start:end])))
+    return chunks
+
+
+def _band_masks(freqs, bands):
+    masks = []
+    for band_name, (freq_min, freq_max) in bands.items():
+        mask = (freqs >= freq_min) & (freqs < freq_max)
+        if np.any(mask):
+            masks.append((band_name, float(freq_min), float(freq_max), mask))
+    return masks
+
+
 def compute_lfp_band_power_over_time(
     recording,
     electrode_table=None,
@@ -57,9 +98,12 @@ def compute_lfp_band_power_over_time(
     bands=None,
     welch_segment_sec=2,
     return_scaled=True,
+    n_jobs=1,
+    channel_chunk_size=None,
 ) -> pd.DataFrame:
     """Compute Welch band power in sliding windows."""
     bands = bands or DEFAULT_LFP_BANDS
+    n_jobs, channel_chunk_size = _validate_parallel_options(n_jobs, channel_chunk_size)
     fs = float(recording.get_sampling_frequency())
     total_sec = recording.get_num_samples() / fs
     start_sec = max(0.0, float(start_sec))
@@ -81,6 +125,7 @@ def compute_lfp_band_power_over_time(
     else:
         integrate = np.trapz
     rows = []
+    chunks = _channel_chunks(electrode_ids_resolved, channel_ids, n_jobs, channel_chunk_size)
 
     last_start = end_frame - window_frames
     if last_start < start_frame:
@@ -99,18 +144,17 @@ def compute_lfp_band_power_over_time(
             ]
         )
 
-    for win_start in range(start_frame, last_start + 1, step_frames):
+    def compute_window_chunk(win_start, chunk_electrode_ids, chunk_channel_ids):
         win_end = win_start + window_frames
-        traces = get_traces_safe(recording, win_start, win_end, channel_ids, return_scaled=return_scaled)
+        traces = get_traces_safe(recording, win_start, win_end, chunk_channel_ids, return_scaled=return_scaled)
         freqs, psd = signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
+        masks = _band_masks(freqs, bands)
         center_time_sec = (win_start + win_end) / (2 * fs)
-        for channel_idx, (electrode_id, channel_id) in enumerate(zip(electrode_ids_resolved, channel_ids)):
-            for band_name, (freq_min, freq_max) in bands.items():
-                mask = (freqs >= freq_min) & (freqs < freq_max)
-                if not np.any(mask):
-                    continue
+        chunk_rows = []
+        for channel_idx, (electrode_id, channel_id) in enumerate(zip(chunk_electrode_ids, chunk_channel_ids)):
+            for band_name, freq_min, freq_max, mask in masks:
                 power = float(integrate(psd[mask, channel_idx], freqs[mask]))
-                rows.append(
+                chunk_rows.append(
                     {
                         "electrode_id": int(electrode_id),
                         "channel_id": channel_id,
@@ -118,12 +162,27 @@ def compute_lfp_band_power_over_time(
                         "window_start_sec": win_start / fs,
                         "window_end_sec": win_end / fs,
                         "band": band_name,
-                        "freq_min_hz": float(freq_min),
-                        "freq_max_hz": float(freq_max),
+                        "freq_min_hz": freq_min,
+                        "freq_max_hz": freq_max,
                         "power": power,
                         "power_db": float(10 * np.log10(power + np.finfo(float).eps)),
                     }
                 )
+        return chunk_rows
+
+    for win_start in range(start_frame, last_start + 1, step_frames):
+        if n_jobs == 1:
+            chunk_results = [
+                compute_window_chunk(win_start, chunk_electrode_ids, chunk_channel_ids)
+                for chunk_electrode_ids, chunk_channel_ids in chunks
+            ]
+        else:
+            chunk_results = Parallel(n_jobs=n_jobs, backend="threading")(
+                delayed(compute_window_chunk)(win_start, chunk_electrode_ids, chunk_channel_ids)
+                for chunk_electrode_ids, chunk_channel_ids in chunks
+            )
+        for chunk_rows in chunk_results:
+            rows.extend(chunk_rows)
     return pd.DataFrame(rows)
 
 
@@ -134,17 +193,33 @@ def compute_welch_spectrum_summary(
     max_freq_hz=None,
     welch_segment_sec=2,
     return_scaled=True,
+    n_jobs=1,
+    channel_chunk_size=None,
 ) -> dict[str, np.ndarray]:
     """Compute all-channel Welch summary statistics for a recording segment."""
+    n_jobs, channel_chunk_size = _validate_parallel_options(n_jobs, channel_chunk_size)
     fs = float(recording.get_sampling_frequency())
     end_frame = min(recording.get_num_samples(), int(round(float(duration_sec) * fs)))
     if end_frame <= 0:
         raise ValueError("duration_sec must select at least one sample.")
     if channel_ids is None:
         channel_ids = list(recording.get_channel_ids())
-    traces = get_traces_safe(recording, 0, end_frame, channel_ids, return_scaled=return_scaled)
-    nperseg = max(1, min(int(round(float(welch_segment_sec) * fs)), traces.shape[0]))
-    freqs, psd = signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
+    channel_ids = list(channel_ids)
+    nperseg = max(1, min(int(round(float(welch_segment_sec) * fs)), end_frame))
+    chunks = _channel_chunks(range(len(channel_ids)), channel_ids, n_jobs, channel_chunk_size)
+
+    def compute_spectrum_chunk(chunk_channel_ids):
+        traces = get_traces_safe(recording, 0, end_frame, chunk_channel_ids, return_scaled=return_scaled)
+        return signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
+
+    if n_jobs == 1:
+        chunk_results = [compute_spectrum_chunk(chunk_channel_ids) for _, chunk_channel_ids in chunks]
+    else:
+        chunk_results = Parallel(n_jobs=n_jobs, backend="threading")(
+            delayed(compute_spectrum_chunk)(chunk_channel_ids) for _, chunk_channel_ids in chunks
+        )
+    freqs = chunk_results[0][0]
+    psd = np.concatenate([chunk_psd for _, chunk_psd in chunk_results], axis=1)
     if max_freq_hz is not None:
         mask = freqs <= float(max_freq_hz)
         freqs = freqs[mask]

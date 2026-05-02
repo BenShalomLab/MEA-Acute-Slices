@@ -35,5 +35,6 @@ dependencies:
   - pydantic
   - packaging
   - pytest
+  - pre-commit
   - pip:
       - -e .
