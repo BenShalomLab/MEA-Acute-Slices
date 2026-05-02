@@ -1,0 +1,76 @@
+# Python caches and build artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Local data directories
+data/**
+!data/**/
+!data/**/.gitkeep
+temp/**
+!temp/**/
+!temp/**/.gitkeep
+
+# Generated reports and exports
+reports/figures/**
+!reports/figures/
+!reports/figures/.gitkeep
+reports/pdfs/**
+!reports/pdfs/
+!reports/pdfs/.gitkeep
+
+# Data files
+*.csv
+*.tsv
+*.txt
+*.xlsx
+*.xls
+*.mat
+*.h5
+*.hdf5
+*.nwb
+*.npy
+*.npz
+*.dat
+*.bin
+*.raw
+*.abf
+*.edf
+*.brw
+*.mcd
+
+# Image files
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.svg
+
+# PDF files
+*.pdf
+
+# OS/editor noise
+.DS_Store
+.idea/
+.vscode/

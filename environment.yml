@@ -1,0 +1,37 @@
+name: acute-slice-mea
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - jupyterlab
+  - ipykernel
+  - numpy
+  - scipy
+  - pandas
+  - matplotlib
+  - plotly
+  - seaborn
+  - h5py
+  - spikeinterface
+  - cython
+  - dask
+  - joblib
+  - pillow
+  - pyopengl
+  - pyqt
+  - pyqtwebengine
+  - qtconsole
+  - requests
+  - responses
+  - scikit-learn
+  - xarray
+  - networkx
+  - numba
+  - tqdm
+  - zarr
+  - pydantic
+  - packaging
+  - pytest
+  - pip:
+      - -e .
