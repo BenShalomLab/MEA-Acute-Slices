@@ -33,6 +33,13 @@ def build_parser():
     compute.add_argument("--no-dashboard-data", action="store_true")
     compute.add_argument("--n-jobs", type=int, default=1, help="parallel worker count for channel-batched LFP analysis")
     compute.add_argument("--channel-chunk-size", type=int, default=None, help="channels per parallel LFP task")
+    compute.add_argument(
+        "--progress",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="show progress bars for long-running compute steps (default: enabled)",
+    )
+    compute.add_argument("--verbose", action="store_true", help="print stage-level progress messages to stderr")
     return parser
 
 
@@ -55,6 +62,8 @@ def main(argv=None):
             export_dashboard_data=not args.no_dashboard_data,
             n_jobs=args.n_jobs,
             channel_chunk_size=args.channel_chunk_size,
+            progress=args.progress,
+            verbose=args.verbose,
         )
         manifest = run_analysis(config)
         print(json.dumps(manifest, indent=2, default=str))

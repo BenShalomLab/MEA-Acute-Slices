@@ -1,7 +1,11 @@
+import sys
+import types
+
 import numpy as np
 import pandas as pd
 import pytest
 
+import acute_slice_mea.spectral as spectral
 from acute_slice_mea.spectral import (
     DEFAULT_LFP_BANDS,
     compute_lfp_band_power_over_time,
@@ -185,3 +189,122 @@ def test_parallel_options_reject_invalid_values():
 
     with pytest.raises(ValueError, match="channel_chunk_size"):
         compute_welch_spectrum_summary(recording, channel_chunk_size=0)
+
+
+def test_lfp_band_power_wraps_window_iterator_when_progress_enabled(monkeypatch):
+    calls = []
+
+    def fake_progress_iter(iterable, *, total=None, desc=None):
+        calls.append({"items": list(iterable), "total": total, "desc": desc})
+        return calls[-1]["items"]
+
+    monkeypatch.setattr(spectral, "_progress_iter", fake_progress_iter)
+
+    fs = 100.0
+    t = np.arange(0, 20, 1 / fs)
+    recording = FakeRecording(np.sin(2 * np.pi * 2 * t)[:, None], fs=fs)
+
+    result = compute_lfp_band_power_over_time(
+        recording,
+        start_sec=0,
+        end_sec=20,
+        window_sec=10,
+        step_sec=5,
+        progress=True,
+    )
+
+    assert not result.empty
+    assert calls == [{"items": [0, 500, 1000], "total": 3, "desc": "LFP band power"}]
+
+
+def test_welch_spectrum_summary_wraps_chunk_iterator_when_progress_enabled(monkeypatch):
+    calls = []
+
+    def fake_progress_iter(iterable, *, total=None, desc=None):
+        calls.append({"items": list(iterable), "total": total, "desc": desc})
+        return calls[-1]["items"]
+
+    monkeypatch.setattr(spectral, "_progress_iter", fake_progress_iter)
+
+    fs = 100.0
+    t = np.arange(0, 5, 1 / fs)
+    traces = np.column_stack(
+        [
+            np.sin(2 * np.pi * 8 * t),
+            np.sin(2 * np.pi * 20 * t),
+            np.sin(2 * np.pi * 35 * t),
+        ]
+    )
+    recording = FakeRecording(traces, fs=fs, channel_ids=["ch0", "ch1", "ch2"])
+
+    summary = compute_welch_spectrum_summary(
+        recording,
+        duration_sec=5,
+        max_freq_hz=40,
+        n_jobs=1,
+        channel_chunk_size=1,
+        progress=True,
+    )
+
+    assert list(summary["channel_ids"]) == ["ch0", "ch1", "ch2"]
+    assert calls == [
+        {
+            "items": [([0], ["ch0"]), ([1], ["ch1"]), ([2], ["ch2"])],
+            "total": 3,
+            "desc": "Welch spectrum",
+        }
+    ]
+
+
+def test_spectral_functions_do_not_wrap_iterators_when_progress_disabled(monkeypatch):
+    calls = []
+
+    def fake_progress_iter(iterable, *, total=None, desc=None):
+        calls.append({"total": total, "desc": desc})
+        return iterable
+
+    monkeypatch.setattr(spectral, "_progress_iter", fake_progress_iter)
+
+    fs = 100.0
+    t = np.arange(0, 20, 1 / fs)
+    traces = np.column_stack(
+        [
+            np.sin(2 * np.pi * 2 * t),
+            np.sin(2 * np.pi * 10 * t),
+        ]
+    )
+    recording = FakeRecording(traces, fs=fs, channel_ids=["ch0", "ch1"])
+
+    compute_lfp_band_power_over_time(
+        recording,
+        start_sec=0,
+        end_sec=20,
+        window_sec=10,
+        step_sec=5,
+        progress=False,
+    )
+    compute_welch_spectrum_summary(
+        recording,
+        duration_sec=5,
+        max_freq_hz=40,
+        channel_chunk_size=1,
+        progress=False,
+    )
+
+    assert calls == []
+
+
+def test_progress_iter_uses_notebook_tqdm_in_notebook_context(monkeypatch):
+    calls = []
+
+    def fake_tqdm(iterable, *, total=None, desc=None):
+        calls.append({"items": list(iterable), "total": total, "desc": desc})
+        return calls[-1]["items"]
+
+    monkeypatch.setattr(spectral, "_in_notebook", lambda: True)
+    monkeypatch.setitem(sys.modules, "tqdm.notebook", types.SimpleNamespace(tqdm=fake_tqdm))
+
+    result = spectral._progress_iter(range(3), total=3, desc="Notebook progress")
+
+    assert result == [0, 1, 2]
+    assert calls == [{"items": [0, 1, 2], "total": 3, "desc": "Notebook progress"}]

@@ -87,6 +87,23 @@ def _band_masks(freqs, bands):
     return masks
 
 
+def _in_notebook():
+    try:
+        from IPython import get_ipython
+    except ImportError:
+        return False
+    shell = get_ipython()
+    return shell is not None and shell.__class__.__name__ == "ZMQInteractiveShell"
+
+
+def _progress_iter(iterable, *, total=None, desc=None):
+    if _in_notebook():
+        from tqdm.notebook import tqdm
+    else:
+        from tqdm import tqdm
+    return tqdm(iterable, total=total, desc=desc)
+
+
 def compute_lfp_band_power_over_time(
     recording,
     electrode_table=None,
@@ -100,6 +117,7 @@ def compute_lfp_band_power_over_time(
     return_scaled=True,
     n_jobs=1,
     channel_chunk_size=None,
+    progress=False,
 ) -> pd.DataFrame:
     """Compute Welch band power in sliding windows."""
     bands = bands or DEFAULT_LFP_BANDS
@@ -170,7 +188,12 @@ def compute_lfp_band_power_over_time(
                 )
         return chunk_rows
 
-    for win_start in range(start_frame, last_start + 1, step_frames):
+    window_starts = range(start_frame, last_start + 1, step_frames)
+    if progress:
+        total_windows = ((last_start - start_frame) // step_frames) + 1
+        window_starts = _progress_iter(window_starts, total=total_windows, desc="LFP band power")
+
+    for win_start in window_starts:
         if n_jobs == 1:
             chunk_results = [
                 compute_window_chunk(win_start, chunk_electrode_ids, chunk_channel_ids)
@@ -195,6 +218,7 @@ def compute_welch_spectrum_summary(
     return_scaled=True,
     n_jobs=1,
     channel_chunk_size=None,
+    progress=False,
 ) -> dict[str, np.ndarray]:
     """Compute all-channel Welch summary statistics for a recording segment."""
     n_jobs, channel_chunk_size = _validate_parallel_options(n_jobs, channel_chunk_size)
@@ -212,11 +236,15 @@ def compute_welch_spectrum_summary(
         traces = get_traces_safe(recording, 0, end_frame, chunk_channel_ids, return_scaled=return_scaled)
         return signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
 
+    chunk_iter = chunks
+    if progress:
+        chunk_iter = _progress_iter(chunk_iter, total=len(chunks), desc="Welch spectrum")
+
     if n_jobs == 1:
-        chunk_results = [compute_spectrum_chunk(chunk_channel_ids) for _, chunk_channel_ids in chunks]
+        chunk_results = [compute_spectrum_chunk(chunk_channel_ids) for _, chunk_channel_ids in chunk_iter]
     else:
         chunk_results = Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(compute_spectrum_chunk)(chunk_channel_ids) for _, chunk_channel_ids in chunks
+            delayed(compute_spectrum_chunk)(chunk_channel_ids) for _, chunk_channel_ids in chunk_iter
         )
     freqs = chunk_results[0][0]
     psd = np.concatenate([chunk_psd for _, chunk_psd in chunk_results], axis=1)

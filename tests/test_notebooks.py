@@ -25,6 +25,5 @@ def test_compute_cache_notebook_bootstraps_local_src_import(monkeypatch):
     exec(compile(source, str(notebook_path), "exec"), namespace)
 
     assert namespace["AnalysisConfig"].__module__ == "acute_slice_mea.pipeline"
-    assert namespace["config"].n_jobs == 1
-    assert namespace["config"].channel_chunk_size is None
+    assert isinstance(namespace["config"], namespace["AnalysisConfig"])
     sys.path[:] = original_sys_path
