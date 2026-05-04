@@ -51,7 +51,7 @@ def plot_channel_quality(summaries: dict, locations: np.ndarray, figures_dir: st
     axes[0].axvline(med, color="black", ls="--", lw=1.5, label=f"median {med:.2f} µV")
     axes[0].set_xlabel("RMS (µV)")
     axes[0].set_ylabel("Channel count")
-    axes[0].legend(loc="upper left", bbox_to_anchor=(1.0, 1.0), frameon=False)
+    axes[0].legend(loc="upper right", frameon=False)
 
     sc = axes[1].scatter(locations[:, 0], locations[:, 1], c=rms, s=14, cmap=SEQUENTIAL_CMAP, linewidths=0)
     axes[1].set_title("Spatial RMS")
@@ -76,9 +76,20 @@ def plot_summary_panel(summaries: dict, locations: np.ndarray, figures_dir: str 
     pca = summaries["pca"]
     band_power = summaries["band_power"]
 
-    fig = plt.figure(figsize=(15, 11))
+    fig = plt.figure(figsize=(15.5, 11))
     fig.suptitle("10 LFP Recording Summary")
-    gs = gridspec.GridSpec(4, 6, figure=fig, height_ratios=[1.4, 1.0, 0.95, 0.95], hspace=0.75, wspace=0.55)
+    gs = gridspec.GridSpec(
+        4,
+        6,
+        figure=fig,
+        height_ratios=[1.4, 1.0, 0.95, 0.95],
+        left=0.06,
+        right=0.88,
+        bottom=0.10,
+        top=0.92,
+        hspace=0.85,
+        wspace=0.70,
+    )
 
     ax_over = fig.add_subplot(gs[0, :])
     im = ax_over.imshow(rms_timebins[order], cmap=SEQUENTIAL_CMAP, aspect=max(rms_timebins.shape[1] / max(rms_timebins.shape[0], 1) / 2.2, 0.03))
@@ -86,7 +97,8 @@ def plot_summary_panel(summaries: dict, locations: np.ndarray, figures_dir: str 
     ax_over.set_xlabel("Time (mm:ss)")
     ax_over.set_ylabel("Channels by RMS")
     ax_over.xaxis.set_major_formatter(mmss_formatter())
-    cbar = fig.colorbar(im, ax=ax_over, pad=0.01)
+    cax_over = fig.add_axes([0.90, 0.735, 0.014, 0.17])
+    cbar = fig.colorbar(im, cax=cax_over)
     cbar.set_label("RMS (µV)")
 
     ax_psd = fig.add_subplot(gs[1:3, :3])
@@ -100,7 +112,8 @@ def plot_summary_panel(summaries: dict, locations: np.ndarray, figures_dir: str 
     sc = ax_pc.scatter(locations[:, 0], locations[:, 1], c=pca["components"][0], s=14, cmap="RdBu_r", linewidths=0)
     ax_pc.set_title(f"PC1 spatial loading ({pca['explained_variance_ratio'][0] * 100:.1f}% var.)")
     set_equal_spatial_axes(ax_pc, locations)
-    cbar = fig.colorbar(sc, ax=ax_pc, pad=0.01)
+    cax_pc = fig.add_axes([0.90, 0.395, 0.014, 0.23])
+    cbar = fig.colorbar(sc, cax=cax_pc)
     cbar.set_label("Loading")
 
     for i, (name, values) in enumerate(band_power.items()):
@@ -117,5 +130,4 @@ def plot_summary_panel(summaries: dict, locations: np.ndarray, figures_dir: str 
         cb.ax.tick_params(labelsize=8)
 
     add_caption(fig, "Combined view of temporal RMS structure, spectral content, dominant spatial mode, and band-limited spatial power.")
-    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
     save_figure(fig, Path(figures_dir), "10_summary_panel")

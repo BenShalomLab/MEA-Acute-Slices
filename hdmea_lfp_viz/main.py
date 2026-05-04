@@ -17,7 +17,7 @@ from hdmea_lfp_viz import preprocess
 from hdmea_lfp_viz.plots.connectivity import plot_correlation_matrix
 from hdmea_lfp_viz.plots.decomposition import plot_pca_components
 from hdmea_lfp_viz.plots.overview import plot_channel_quality, plot_overview_heatmap, plot_summary_panel
-from hdmea_lfp_viz.plots.spatial import plot_band_envelope_frames, plot_band_power_maps, save_band_envelope_movie
+from hdmea_lfp_viz.plots.spatial import plot_band_envelope_frames, plot_band_power_maps, save_band_envelope_movies
 from hdmea_lfp_viz.plots.spectral import plot_psd_grid, plot_spectrograms
 from hdmea_lfp_viz.plots.traces import plot_representative_traces
 from hdmea_lfp_viz.style import apply_style
@@ -81,7 +81,7 @@ def generate_figures(recording, summaries: dict, figures_dir: Path, *, skip_movi
     plot_summary_panel(summaries, locations, figures_dir)
     print(f"[figures] Wrote {figures_dir / '10_summary_panel.png'}")
     if not skip_movie:
-        save_band_envelope_movie(recording, locations, figures_dir)
+        save_band_envelope_movies(recording, locations, figures_dir)
 
 
 def parse_args() -> argparse.Namespace:
@@ -93,7 +93,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-preprocess", action="store_true", help="Use existing ./cache/lfp_1khz.zarr.")
     parser.add_argument("--skip-summaries", action="store_true", help="Use existing ./cache/summaries.npz.")
     parser.add_argument("--figures-only", action="store_true", help="Equivalent to --skip-preprocess --skip-summaries.")
-    parser.add_argument("--skip-movie", action="store_true", help="Skip the slow MP4 low-gamma animation.")
+    parser.add_argument("--skip-movie", action="store_true", help="Skip the slow MP4 band-envelope animations.")
     parser.add_argument("--overwrite-cache", action="store_true", help="Overwrite existing Zarr and summary caches.")
     parser.add_argument("--n-jobs", type=int, default=1, help="SpikeInterface jobs for Zarr saving.")
     parser.add_argument("--psd-batch-channels", type=int, default=100, help="Channels per Welch PSD batch.")

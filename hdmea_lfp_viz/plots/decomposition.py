@@ -23,7 +23,13 @@ def plot_pca_components(recording, summaries: dict, locations: np.ndarray, figur
     sf = float(recording.get_sampling_frequency())
     top = min(5, components.shape[0])
 
-    fig, axes = plt.subplots(top, 2, figsize=(14, 2.6 * top), gridspec_kw={"width_ratios": [1.0, 2.2]})
+    fig, axes = plt.subplots(
+        top,
+        2,
+        figsize=(14, 2.6 * top),
+        gridspec_kw={"width_ratios": [1.0, 2.2]},
+        constrained_layout=True,
+    )
     if top == 1:
         axes = np.asarray([axes])
     fig.suptitle("06 PCA Spatial Components and Time Courses")
@@ -53,5 +59,4 @@ def plot_pca_components(recording, summaries: dict, locations: np.ndarray, figur
         ax_time.xaxis.set_major_formatter(mmss_formatter())
     axes[-1, 1].set_xlabel("Time (mm:ss)")
     add_caption(fig, "Incremental PCA treats time samples as observations and channels as spatial features; traces are strided for display.")
-    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
     save_figure(fig, Path(figures_dir), "06_pca_components")

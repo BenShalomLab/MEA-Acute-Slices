@@ -11,6 +11,12 @@ from hdmea_lfp_viz.style import add_caption, mmss, save_figure
 from hdmea_lfp_viz.summaries import channel_ids_from_indices
 
 
+REPRESENTATIVE_SELECTION_NOTE = (
+    "Representative channels: top 3 RMS, 25/50/75% RMS quantiles, and bottom 2 RMS channels; "
+    "duplicates filled by next highest RMS."
+)
+
+
 def select_representative_channels(rms_per_channel: np.ndarray, n: int = 8) -> np.ndarray:
     """Pick high-, mid-, and low-RMS channels for contrast."""
     rms = np.asarray(rms_per_channel)
@@ -33,6 +39,11 @@ def select_representative_channels(rms_per_channel: np.ndarray, n: int = 8) -> n
         if int(ch) not in unique:
             unique.append(int(ch))
     return np.asarray(unique[:n], dtype=int)
+
+
+def representative_channels_with_note(rms_per_channel: np.ndarray, n: int = 8) -> tuple[np.ndarray, str]:
+    """Return representative channels and a figure-ready selection note."""
+    return select_representative_channels(rms_per_channel, n=n), REPRESENTATIVE_SELECTION_NOTE
 
 
 def _recording_traces(recording, start_s: float, duration_s: float, channels: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -69,7 +80,7 @@ def _minmax_decimate(t: np.ndarray, y: np.ndarray, max_points: int = 5000) -> tu
 def plot_representative_traces(recording, summaries: dict, figures_dir: str | Path) -> None:
     """Figure 07: representative channels in early/mid/late 10-second windows."""
     figures_dir = Path(figures_dir)
-    channels = select_representative_channels(summaries["rms_per_channel"], n=8)
+    channels, selection_note = representative_channels_with_note(summaries["rms_per_channel"], n=8)
     sf = float(recording.get_sampling_frequency())
     duration_s = recording.get_num_samples() / sf
     windows = [0.0, max(0.0, duration_s / 2.0 - 5.0), max(0.0, duration_s - 10.0)]
@@ -96,9 +107,11 @@ def plot_representative_traces(recording, summaries: dict, figures_dir: str | Pa
         ax.plot([bar_x, bar_x], [bar_y, bar_y + scale], color="black", lw=1.2)
         ax.text(bar_x + 0.12, bar_y + scale / 2, f"{scale:.1f} µV", va="center", fontsize=9)
     axes[-1].set_xlabel("Time within window (s)")
+    fig.text(0.5, 0.045, selection_note, ha="center", va="bottom", fontsize=10, color="0.20")
     add_caption(
         fig,
-        "Eight channels selected from high, mid, and low RMS ranges; traces are vertically offset and peak-preserving downsampled for display.",
+        "Traces are vertically offset and peak-preserving downsampled for display.",
+        y=0.015,
     )
-    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
+    fig.tight_layout(rect=[0, 0.075, 1, 0.96])
     save_figure(fig, figures_dir, "07_representative_traces")

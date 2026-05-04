@@ -106,6 +106,13 @@ figures/01_overview_heatmap.svg
 ...
 figures/10_summary_panel.png
 figures/10_summary_panel.svg
+figures/band_envelope_delta.mp4
+figures/band_envelope_theta.mp4
+figures/band_envelope_alpha.mp4
+figures/band_envelope_beta.mp4
+figures/band_envelope_low_gamma.mp4
+figures/band_envelope_high_gamma.mp4
+figures/band_envelope.mp4
 figures/run_report.json
 ```
 
@@ -115,5 +122,7 @@ After the cache exists, iterate on figures without recomputing preprocessing or 
 python -m hdmea_lfp_viz.main --figures-only --skip-movie
 ```
 
-To generate `figures/band_envelope.mp4`, install a system `ffmpeg` binary and omit `--skip-movie`.
+To generate the band-envelope MP4 files, install a system `ffmpeg` binary and omit `--skip-movie`.
+Movies play at 10x real time by default.
+The legacy `figures/band_envelope.mp4` path is also written as a copy of `figures/band_envelope_low_gamma.mp4`.
 Use `--overwrite-cache` when intentionally rebuilding the Zarr and summary caches from the raw file.

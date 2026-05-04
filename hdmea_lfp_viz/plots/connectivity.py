@@ -23,9 +23,20 @@ def plot_correlation_matrix(summaries: dict, figures_dir: str | Path) -> None:
     order = leaves_list(z)
     clustered = corr[np.ix_(order, order)]
 
-    fig = plt.figure(figsize=(10, 10))
+    fig = plt.figure(figsize=(10.5, 10))
     fig.suptitle("05 Channel Correlation Matrix")
-    gs = fig.add_gridspec(2, 2, width_ratios=[1.0, 8.0], height_ratios=[1.0, 8.0], hspace=0.02, wspace=0.02)
+    gs = fig.add_gridspec(
+        2,
+        2,
+        width_ratios=[1.0, 8.0],
+        height_ratios=[1.0, 8.0],
+        left=0.07,
+        right=0.86,
+        bottom=0.09,
+        top=0.91,
+        hspace=0.02,
+        wspace=0.02,
+    )
     ax_blank = fig.add_subplot(gs[0, 0])
     ax_blank.axis("off")
     ax_top = fig.add_subplot(gs[0, 1])
@@ -40,8 +51,8 @@ def plot_correlation_matrix(summaries: dict, figures_dir: str | Path) -> None:
     im = ax_mat.imshow(clustered, cmap=DIVERGING_CMAP, norm=TwoSlopeNorm(vcenter=0.0, vmin=-1.0, vmax=1.0), rasterized=True)
     ax_mat.set_xlabel("Clustered channels")
     ax_mat.set_ylabel("Clustered channels")
-    cbar = fig.colorbar(im, ax=ax_mat, pad=0.01)
+    cax = fig.add_axes([0.89, 0.17, 0.02, 0.64])
+    cbar = fig.colorbar(im, cax=cax)
     cbar.set_label("Pearson r")
     add_caption(fig, "Channels are reordered by Ward clustering on 1 - |correlation| to reveal correlated spatial or noise-related channel groups.")
-    fig.tight_layout(rect=[0, 0.04, 1, 0.96])
     save_figure(fig, Path(figures_dir), "05_correlation_matrix")

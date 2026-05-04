@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from scipy.signal import spectrogram
 
-from hdmea_lfp_viz.plots.traces import select_representative_channels
+from hdmea_lfp_viz.plots.traces import representative_channels_with_note
 from hdmea_lfp_viz.style import CB_SAFE_CMAP, add_caption, mmss_formatter, save_figure
 from hdmea_lfp_viz.summaries import channel_ids_from_indices
 
@@ -24,7 +24,7 @@ def plot_psd_grid(summaries: dict, figures_dir: str | Path) -> None:
     q25, q75 = np.nanpercentile(psd, [25, 75], axis=0)
     keep = freqs > 0
 
-    fig, ax = plt.subplots(figsize=(9, 6))
+    fig, ax = plt.subplots(figsize=(9.5, 6))
     fig.suptitle("03 LFP Power Spectral Density")
     ax.fill_between(freqs[keep], q25[keep], q75[keep], color="#9ecae1", alpha=0.45, label="25-75% IQR")
     ax.loglog(freqs[keep], median[keep], color="black", lw=2.2, label="Median")
@@ -37,13 +37,13 @@ def plot_psd_grid(summaries: dict, figures_dir: str | Path) -> None:
     ax.grid(True, which="both", alpha=0.2)
     ax.legend(loc="upper left", bbox_to_anchor=(1.02, 1.0), frameon=False)
     add_caption(fig, "Welch PSD per channel, summarized by the channel median and interquartile range; dashed lines mark canonical band boundaries.")
-    fig.tight_layout(rect=[0, 0.05, 0.86, 0.95])
+    fig.subplots_adjust(left=0.11, right=0.74, bottom=0.16, top=0.90)
     save_figure(fig, Path(figures_dir), "03_psd_grid")
 
 
 def plot_spectrograms(recording, summaries: dict, figures_dir: str | Path) -> None:
     """Figure 08: Welch spectrograms for representative channels."""
-    channels = select_representative_channels(summaries["rms_per_channel"], n=8)
+    channels, selection_note = representative_channels_with_note(summaries["rms_per_channel"], n=8)
     sf = float(recording.get_sampling_frequency())
     traces = recording.get_traces(channel_ids=channel_ids_from_indices(recording, channels), return_scaled=True).astype(np.float32, copy=False)
     nperseg = int(round(2.0 * sf))
@@ -67,7 +67,7 @@ def plot_spectrograms(recording, summaries: dict, figures_dir: str | Path) -> No
         specs.append(10.0 * np.log10(sxx[keep] + np.finfo(np.float32).eps))
     vmin, vmax = np.nanpercentile(np.concatenate([s.ravel() for s in specs]), [2, 98])
 
-    fig, axes = plt.subplots(4, 2, figsize=(14, 10), sharex=True, sharey=True)
+    fig, axes = plt.subplots(4, 2, figsize=(15.5, 10), sharex=True, sharey=True)
     fig.suptitle("08 Representative Channel Spectrograms")
     last_im = None
     for ax, ch, spec in zip(axes.flat, channels, specs):
@@ -77,8 +77,14 @@ def plot_spectrograms(recording, summaries: dict, figures_dir: str | Path) -> No
         ax.xaxis.set_major_formatter(mmss_formatter())
     for ax in axes[-1, :]:
         ax.set_xlabel("Time (mm:ss)")
-    cbar = fig.colorbar(last_im, ax=axes.ravel().tolist(), pad=0.01)
+    fig.subplots_adjust(left=0.07, right=0.86, bottom=0.12, top=0.88, hspace=0.36, wspace=0.12)
+    cax = fig.add_axes([0.89, 0.18, 0.02, 0.64])
+    cbar = fig.colorbar(last_im, cax=cax)
     cbar.set_label("Power (dB µV²/Hz)")
-    add_caption(fig, "Two-second Welch spectrograms with 50% overlap, restricted to 0-150 Hz and shown on a shared log-power color scale.")
-    fig.tight_layout(rect=[0, 0.05, 0.93, 0.95])
+    fig.text(0.5, 0.055, selection_note, ha="center", va="bottom", fontsize=10, color="0.20")
+    add_caption(
+        fig,
+        "Two-second Welch spectrograms with 50% overlap, restricted to 0-150 Hz and shown on a shared log-power color scale.",
+        y=0.025,
+    )
     save_figure(fig, Path(figures_dir), "08_spectrograms")
