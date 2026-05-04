@@ -96,6 +96,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-movie", action="store_true", help="Skip the slow MP4 band-envelope animations.")
     parser.add_argument("--overwrite-cache", action="store_true", help="Overwrite existing Zarr and summary caches.")
     parser.add_argument("--n-jobs", type=int, default=1, help="SpikeInterface jobs for Zarr saving.")
+    parser.add_argument(
+        "--spikeinterface-chunk-duration",
+        default=preprocess.DEFAULT_SPIKEINTERFACE_CHUNK_DURATION,
+        help="SpikeInterface global chunk duration used while constructing preprocessing. Default: 60s",
+    )
     parser.add_argument("--psd-batch-channels", type=int, default=100, help="Channels per Welch PSD batch.")
     return parser.parse_args()
 
@@ -130,6 +135,7 @@ def main() -> None:
             stream_id=args.stream_id,
             overwrite=args.overwrite_cache,
             n_jobs=args.n_jobs,
+            spikeinterface_chunk_duration=args.spikeinterface_chunk_duration,
         )
     timings["preprocess_s"] = time.perf_counter() - stage_start
 

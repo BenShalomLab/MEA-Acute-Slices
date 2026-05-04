@@ -8,6 +8,7 @@ from pathlib import Path
 
 
 RAW_PATH = None
+DEFAULT_SPIKEINTERFACE_CHUNK_DURATION = "60s"
 
 
 def _path_mtime(path: Path) -> float:
@@ -53,6 +54,16 @@ def build_lfp_preprocessing(recording):
     return rec
 
 
+def configure_spikeinterface_jobs(*, chunk_duration: str | None, n_jobs: int) -> None:
+    """Set SpikeInterface chunking before constructing preprocessing wrappers."""
+    if not chunk_duration:
+        return
+
+    import spikeinterface as si
+
+    si.set_global_job_kwargs(chunk_duration=chunk_duration, n_jobs=n_jobs)
+
+
 def save_lfp_cache(
     raw_path: str | Path,
     *,
@@ -60,6 +71,7 @@ def save_lfp_cache(
     stream_id: str | None = None,
     overwrite: bool = False,
     n_jobs: int = 1,
+    spikeinterface_chunk_duration: str | None = DEFAULT_SPIKEINTERFACE_CHUNK_DURATION,
 ) -> Path:
     """Preprocess a Maxwell recording and save the 1 kHz LFP Zarr cache."""
     raw_path = Path(raw_path)
@@ -74,6 +86,7 @@ def save_lfp_cache(
 
     recording_raw = read_maxwell(raw_path, stream_id=stream_id)
     raw_sampling_frequency = float(recording_raw.get_sampling_frequency())
+    configure_spikeinterface_jobs(chunk_duration=spikeinterface_chunk_duration, n_jobs=n_jobs)
     lfp = build_lfp_preprocessing(recording_raw)
     n_channels = int(lfp.get_num_channels())
 
@@ -102,6 +115,7 @@ def save_lfp_cache(
         "duration_s": float(lfp.get_num_samples() / lfp.get_sampling_frequency()),
         "zarr_chunks_samples_channels": [10_000, n_channels],
         "logical_chunking_channels_samples": [n_channels, 10_000],
+        "spikeinterface_chunk_duration": spikeinterface_chunk_duration,
         "preprocessing": {
             "bandpass_hz": [0.5, 300.0],
             "butterworth_order": 4,
