@@ -78,3 +78,42 @@ jupyter lab
 ```
 
 Start new analyses by copying or editing `notebooks/00_mea_analysis_template.ipynb`.
+
+## HD-MEA LFP Exploratory Figures
+
+This repository also includes a reproducible, non-interactive LFP visualization pipeline in `hdmea_lfp_viz/`.
+It reads a Maxwell MaxTwo `.h5` file with SpikeInterface, saves a 1 kHz LFP Zarr cache, computes summary statistics, and writes publication-style PNG/SVG figures.
+
+Install the plotting pipeline dependencies:
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Run the full pipeline on a new Maxwell recording:
+
+```bash
+python -m hdmea_lfp_viz.main /path/to/recording.h5 --stream-id well000 --skip-movie
+```
+
+Outputs are written to:
+
+```text
+cache/lfp_1khz.zarr
+cache/summaries.npz
+figures/01_overview_heatmap.png
+figures/01_overview_heatmap.svg
+...
+figures/10_summary_panel.png
+figures/10_summary_panel.svg
+figures/run_report.json
+```
+
+After the cache exists, iterate on figures without recomputing preprocessing or summaries:
+
+```bash
+python -m hdmea_lfp_viz.main --figures-only --skip-movie
+```
+
+To generate `figures/band_envelope.mp4`, install a system `ffmpeg` binary and omit `--skip-movie`.
+Use `--overwrite-cache` when intentionally rebuilding the Zarr and summary caches from the raw file.

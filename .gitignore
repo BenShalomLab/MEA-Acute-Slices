@@ -1,3 +1,5 @@
+*.log
+
 # Python caches and build artifacts
 __pycache__/
 *.py[cod]
@@ -28,6 +30,8 @@ data/**
 temp/**
 !temp/**/
 !temp/**/.gitkeep
+cache/**
+figures/**
 
 # Generated reports and exports
 reports/figures/**
@@ -41,6 +45,7 @@ reports/pdfs/**
 *.csv
 *.tsv
 *.txt
+!requirements.txt
 *.xlsx
 *.xls
 *.mat
