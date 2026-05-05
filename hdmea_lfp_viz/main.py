@@ -88,6 +88,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("raw_path", nargs="?", help="Path to Maxwell .h5 recording. Falls back to RAW_PATH in preprocess.py.")
     parser.add_argument("--stream-id", default=None, help="Optional Maxwell stream_id/well id for read_maxwell.")
+    parser.add_argument("--rec-name", default=None, help="Optional Maxwell rec_name override, e.g. rec0000.")
     parser.add_argument("--cache-dir", default="cache", help="Cache directory. Default: ./cache")
     parser.add_argument("--figures-dir", default="figures", help="Figure output directory. Default: ./figures")
     parser.add_argument("--skip-preprocess", action="store_true", help="Use existing ./cache/lfp_1khz.zarr.")
@@ -96,6 +97,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-movie", action="store_true", help="Skip the slow MP4 band-envelope animations.")
     parser.add_argument("--overwrite-cache", action="store_true", help="Overwrite existing Zarr and summary caches.")
     parser.add_argument("--n-jobs", type=int, default=1, help="SpikeInterface jobs for Zarr saving.")
+    parser.add_argument(
+        "--notch-frequencies",
+        default=",".join(f"{freq:g}" for freq in preprocess.DEFAULT_NOTCH_FREQUENCIES),
+        help="Comma-separated notch frequencies in Hz. Default: 60,120,180",
+    )
+    parser.add_argument("--notch-q", type=float, default=preprocess.DEFAULT_NOTCH_Q, help="Notch filter Q factor. Default: 30")
+    parser.add_argument("--disable-notch-filter", action="store_true", help="Skip notch filters during LFP preprocessing.")
     parser.add_argument(
         "--spikeinterface-chunk-duration",
         default=preprocess.DEFAULT_SPIKEINTERFACE_CHUNK_DURATION,
@@ -120,6 +128,7 @@ def main() -> None:
         args.skip_summaries = True
     if not args.skip_preprocess and raw_path is None:
         raise SystemExit("A raw Maxwell .h5 path is required unless --skip-preprocess or --figures-only is used.")
+    notch_frequencies = () if args.disable_notch_filter else preprocess.normalize_notch_frequencies(args.notch_frequencies)
 
     timings = {}
     stage_start = time.perf_counter()
@@ -133,9 +142,12 @@ def main() -> None:
             raw_path,
             cache_dir=cache_dir,
             stream_id=args.stream_id,
+            rec_name=args.rec_name,
             overwrite=args.overwrite_cache,
             n_jobs=args.n_jobs,
             spikeinterface_chunk_duration=args.spikeinterface_chunk_duration,
+            notch_frequencies=notch_frequencies,
+            notch_q=args.notch_q,
         )
     timings["preprocess_s"] = time.perf_counter() - stage_start
 
