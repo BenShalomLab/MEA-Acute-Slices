@@ -16,6 +16,11 @@ import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, callback_context, ctx, html, no_update
 from dash.exceptions import PreventUpdate
 
+from acute_slice_mea.jobs import (
+    DEFAULT_PARAMS,
+    JobsBackend,
+    PIPELINE_VERSION,
+)
 from acute_slice_mea.library import LibraryIndex, RecordingEntry, WellEntry
 from acute_slice_mea.probe_geometry import (
     MAXWELL_COLS,
@@ -32,23 +37,81 @@ TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 
 
-@lru_cache(maxsize=16)
-def _load_well_data(cache_dir: str) -> WellData:
+@lru_cache(maxsize=32)
+def _load_well_data(cache_dir: str, _cache_version: float) -> WellData:
+    """Load a WellData bundle.
+
+    ``_cache_version`` is the mtime of the cache_meta.json sentinel — including
+    it in the cache key means a fresh ``cache_meta.json`` (written when a job
+    completes or after Recompute) automatically invalidates the LRU entry.
+    """
     return WellData.load(cache_dir)
 
 
-def register_all(app, library: LibraryIndex) -> None:
-    """Bind all callbacks against the given Dash app + library."""
+def _cache_version(cache_dir: Path) -> float:
+    """Stable float key changing whenever the cache is (re)written."""
+    sentinel = Path(cache_dir) / "cache_meta.json"
+    if sentinel.exists():
+        try:
+            return sentinel.stat().st_mtime
+        except OSError:
+            return 0.0
+    manifest = Path(cache_dir) / "manifest.json"
+    if manifest.exists():
+        try:
+            return manifest.stat().st_mtime
+        except OSError:
+            return 0.0
+    return 0.0
+
+
+def register_all(
+    app,
+    library: LibraryIndex,
+    *,
+    jobs_backend: JobsBackend | None = None,
+) -> None:
+    """Bind all callbacks against the given Dash app + library.
+
+    When ``jobs_backend`` is provided the spawn/cache UI (library pills,
+    params sheet, jobs drawer, workers slider) is wired up; otherwise the
+    dashboard runs in view-only mode against pre-built caches.
+    """
 
     # -- helpers ------------------------------------------------------
+
+    def _resolve_cache_dir(recording_id: str, well_id: str) -> Path | None:
+        """Return the cache dir for this (recording, well) if a bundle exists.
+
+        Two lookup paths: the library may already know the cache_dir from
+        startup (cache-only mode, or a well that was cached when the dashboard
+        launched), or we derive the canonical path from
+        ``jobs_backend.cache_root`` and check for ``manifest.json`` on disk.
+        The latter is what lets a freshly-completed job show up without a
+        library rebuild.
+        """
+        well = library.find(recording_id, well_id)
+        if well is not None and well.cache_dir:
+            return Path(well.cache_dir)
+        if jobs_backend is None:
+            return None
+        candidate = Path(
+            jobs_backend.cache_root, *recording_id.split("/"), well_id
+        )
+        if (candidate / "manifest.json").exists():
+            # Memoize on the WellEntry so subsequent lookups are O(1).
+            if well is not None:
+                well.cache_dir = str(candidate)
+            return candidate
+        return None
 
     def _well_data(recording_id: str | None, well_id: str | None) -> WellData | None:
         if not recording_id or not well_id:
             return None
-        well = library.find(recording_id, well_id)
-        if well is None or not well.cache_dir:
+        cache_dir = _resolve_cache_dir(recording_id, well_id)
+        if cache_dir is None:
             return None
-        return _load_well_data(str(well.cache_dir))
+        return _load_well_data(str(cache_dir), _cache_version(cache_dir))
 
     # -- library: click → select recording ----------------------------
 
@@ -410,6 +473,12 @@ def register_all(app, library: LibraryIndex) -> None:
             ]
         return meta, notes_children
 
+    # -------------------------------------------------------------------
+    # Jobs / spawn-and-cache callbacks (only registered in spawn mode).
+    # -------------------------------------------------------------------
+    if jobs_backend is not None:
+        _register_jobs_callbacks(app, library, jobs_backend, _load_well_data)
+
 
 # =============================================================================
 # Figure builders
@@ -734,3 +803,480 @@ def _interp_color(intensity: float) -> str:
     t = max(0.0, min(1.0, float(intensity)))
     rgb = tuple(int(round(c0[i] + (c1[i] - c0[i]) * t)) for i in range(3))
     return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+# =============================================================================
+# Jobs / spawn-and-cache callbacks
+# =============================================================================
+
+
+# Map backend status → (pill label, pill className, action label, action className).
+_PILL_STYLES = {
+    "idle":      ("not computed",  "pill idle",  "Run",       "btn small primary"),
+    "queued":    ("queued",        "pill live",  "Cancel",    "btn small"),
+    "running":   ("running",       "pill live",  "Cancel",    "btn small"),
+    "cached":    ("cached",        "pill ok",    "Recompute", "btn small ghost"),
+    "stale":     ("stale",         "pill warn",  "Recompute", "btn small"),
+    "failed":    ("failed",        "pill err",   "Retry",     "btn small"),
+    "cancelled": ("cancelled",     "pill idle",  "Run",       "btn small primary"),
+}
+
+
+def _format_bytes(n: float | int | None) -> str:
+    if not n:
+        return "—"
+    n = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if n < 1024 or unit == "TB":
+            return f"{n:.1f} {unit}" if unit != "B" else f"{int(n)} B"
+        n /= 1024
+    return f"{n:.1f} TB"
+
+
+def _format_eta(job) -> str:
+    if job.state != "running" or not job.started_at:
+        return ""
+    # We don't have a real ETA from run_analysis; estimate from progress.
+    progress = max(job.progress or 0.0, 0.01)
+    elapsed = max(1.0, (job.last_heartbeat or job.started_at) - job.started_at)
+    remaining = elapsed * (1.0 - progress) / progress
+    if remaining <= 0:
+        return "finishing…"
+    if remaining < 60:
+        return f"{int(remaining)}s left"
+    m, s = divmod(int(remaining), 60)
+    return f"{m}m {s}s left"
+
+
+def _register_jobs_callbacks(app, library, backend, load_well_data):
+    """Bind callbacks that drive the library pills, jobs drawer, params sheet,
+    workers slider, and empty-state CTA. Called only when ``--data-root`` was
+    passed at startup.
+    """
+
+    # ── library row pills + progress bars + action buttons ────────────────
+    @app.callback(
+        Output({"type": "lib-status-pill", "recording_id": ALL, "well_id": ALL}, "children"),
+        Output({"type": "lib-status-pill", "recording_id": ALL, "well_id": ALL}, "className"),
+        Output({"type": "lib-progress", "recording_id": ALL, "well_id": ALL}, "children"),
+        Output({"type": "lib-action", "recording_id": ALL, "well_id": ALL}, "children"),
+        Output({"type": "lib-action", "recording_id": ALL, "well_id": ALL}, "className"),
+        Input("jobs-poll", "n_intervals"),
+        State({"type": "lib-status-pill", "recording_id": ALL, "well_id": ALL}, "id"),
+    )
+    def update_library_rows(_tick, pill_ids):
+        backend.refresh()
+        pill_children, pill_classes = [], []
+        progress_children = []
+        action_children, action_classes = [], []
+        for entry in pill_ids:
+            rid, wid = entry["recording_id"], entry["well_id"]
+            status = backend.get_status_for(rid, wid)
+            label, pill_class, action_label, action_class = _PILL_STYLES.get(
+                status, _PILL_STYLES["idle"]
+            )
+            # If running, show the progress %.
+            active_job = next(
+                (j for j in backend.get_jobs_for(rid, wid) if j.state in ("queued", "running")),
+                None,
+            )
+            if active_job and active_job.state == "running":
+                pct = int((active_job.progress or 0.0) * 100)
+                label = f"running {pct}%"
+                width = f"{pct}%"
+            elif active_job and active_job.state == "queued":
+                width = "0%"
+            elif status == "cached":
+                width = "100%"
+            else:
+                width = "0%"
+
+            pill_children.append([html.I(className="dot"), html.Span(label)])
+            pill_classes.append(pill_class)
+            progress_children.append(html.Span(style={"width": width}))
+            action_children.append(action_label)
+            action_classes.append(action_class)
+        return pill_children, pill_classes, progress_children, action_children, action_classes
+
+    # ── jobs badge + cache total readout ─────────────────────────────────
+    @app.callback(
+        Output("jobs-badge", "children"),
+        Output("cache-total-readout", "children"),
+        Input("jobs-poll", "n_intervals"),
+    )
+    def update_topbar_readout(_tick):
+        active = backend.get_active_jobs()
+        cache_total = backend.get_cache_total()
+        cache_label = (
+            f"{cache_total['count']} cached · {_format_bytes(cache_total['bytes'])}"
+            if cache_total["count"]
+            else "no caches"
+        )
+        return str(len(active)), cache_label
+
+    # ── jobs drawer body ─────────────────────────────────────────────────
+    @app.callback(
+        Output("jobs-drawer-body", "children"),
+        Input("jobs-poll", "n_intervals"),
+        Input("jobs-drawer-open", "data"),
+    )
+    def update_drawer_body(_tick, open_):
+        if not open_:
+            raise PreventUpdate
+        active = backend.get_active_jobs()
+        recent = backend.get_recent_jobs()
+        sections: list = []
+        if not active and not recent:
+            return [html.Div("No jobs yet. Submit one from the library.", className="ax-drawer-empty")]
+        if active:
+            sections.append(html.Div("Active", className="ax-drawer-sect"))
+            sections.extend(_render_job_card(j, active=True) for j in active)
+        if recent:
+            sections.append(html.Div("Recent", className="ax-drawer-sect"))
+            sections.extend(_render_job_card(j, active=False) for j in recent)
+        return sections
+
+    # ── drawer toggle ────────────────────────────────────────────────────
+    @app.callback(
+        Output("jobs-drawer-open", "data"),
+        Output("jobs-drawer", "className"),
+        Input("jobs-drawer-toggle", "n_clicks"),
+        Input("jobs-drawer-close", "n_clicks"),
+        State("jobs-drawer-open", "data"),
+        prevent_initial_call=True,
+    )
+    def toggle_drawer(_open, _close, current):
+        triggered = ctx.triggered_id
+        if triggered == "jobs-drawer-close":
+            new_open = False
+        else:
+            new_open = not bool(current)
+        return new_open, "ax-drawer" if new_open else "ax-drawer hidden"
+
+    # ── lib-action click: route to backend or open the sheet ─────────────
+    @app.callback(
+        Output("params-sheet-state", "data"),
+        Output("params-sheet", "className"),
+        Output("params-sheet-subtitle", "children"),
+        Output("params-overwrite-row", "className"),
+        Output("params-overwrite", "value"),
+        Output("params-sheet-error", "children"),
+        Output("params-sheet-error", "className"),
+        Input({"type": "lib-action", "recording_id": ALL, "well_id": ALL}, "n_clicks"),
+        Input("params-cancel", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def on_lib_action(action_clicks, _cancel_clicks):
+        triggered = ctx.triggered_id
+        if triggered == "params-cancel":
+            return (
+                None,
+                "ax-sheet hidden",
+                "",
+                "ax-sheet-row hidden",
+                [],
+                "",
+                "ax-sheet-error hidden",
+            )
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        if not any((c or 0) > 0 for c in (action_clicks or [])):
+            raise PreventUpdate
+        rid = triggered["recording_id"]
+        wid = triggered["well_id"]
+        status = backend.get_status_for(rid, wid)
+        if status in ("queued", "running"):
+            # Cancel the in-flight job.
+            jobs = [j for j in backend.get_jobs_for(rid, wid) if j.state in ("queued", "running")]
+            if jobs:
+                backend.cancel(jobs[0].id)
+            return (
+                None,
+                "ax-sheet hidden",
+                "",
+                "ax-sheet-row hidden",
+                [],
+                "",
+                "ax-sheet-error hidden",
+            )
+        if status == "failed":
+            # Retry directly.
+            jobs = [j for j in backend.get_jobs_for(rid, wid) if j.state == "failed"]
+            if jobs:
+                backend.retry(jobs[0].id)
+            return (
+                None,
+                "ax-sheet hidden",
+                "",
+                "ax-sheet-row hidden",
+                [],
+                "",
+                "ax-sheet-error hidden",
+            )
+        # Open params sheet for run / recompute.
+        rec = library.find_recording(rid)
+        well_label = _well_id_to_name(wid)
+        subtitle = f"{rec.sample if rec else rid} · well {well_label}"
+        cache_exists = backend.get_cache_for(rid, wid) is not None
+        overwrite_cls = "ax-sheet-row" if cache_exists else "ax-sheet-row hidden"
+        state = {"recording_id": rid, "well_id": wid, "cache_exists": cache_exists}
+        return state, "ax-sheet", subtitle, overwrite_cls, [], "", "ax-sheet-error hidden"
+
+    # ── params sheet submit ──────────────────────────────────────────────
+    @app.callback(
+        Output("params-sheet", "className", allow_duplicate=True),
+        Output("params-sheet-error", "children", allow_duplicate=True),
+        Output("params-sheet-error", "className", allow_duplicate=True),
+        Output("params-sheet-state", "data", allow_duplicate=True),
+        Input("params-submit", "n_clicks"),
+        State("params-sheet-state", "data"),
+        State("params-band-low", "value"),
+        State("params-band-high", "value"),
+        State("params-reference", "value"),
+        State("params-decimation", "value"),
+        State("params-overwrite", "value"),
+        prevent_initial_call=True,
+    )
+    def submit_params(_clicks, state, low, high, reference, decimation, overwrite):
+        if not state:
+            raise PreventUpdate
+        rid = state["recording_id"]
+        wid = state["well_id"]
+        rec = library.find_recording(rid)
+        well = library.find(rid, wid) if rec else None
+        raw_path = (well.raw_path if well else None) or (rec.raw_path if rec else None)
+        params = {
+            "band": [float(low or 0.5), float(high or 300)],
+            "reference": str(reference or "CAR"),
+            "decimation": int(decimation or 1),
+            "channels": "routed64",
+        }
+        result = backend.submit(
+            recording_id=rid,
+            well_id=wid,
+            raw_path=raw_path,
+            params=params,
+            overwrite=bool(overwrite),
+            recording_label=rec.label if rec else None,
+            well_label=_well_id_to_name(wid),
+        )
+        if "error" in result:
+            if result["error"] == "cache-exists":
+                msg = "A cache already exists for this well — tick Overwrite to replace it."
+            elif result["error"] == "already-in-flight":
+                msg = "A job for this well is already in flight."
+            else:
+                msg = result["error"]
+            return "ax-sheet", msg, "ax-sheet-error", state
+        # Success: close the sheet, clear state.
+        return "ax-sheet hidden", "", "ax-sheet-error hidden", None
+
+    # ── per-job retry / cancel from drawer ───────────────────────────────
+    @app.callback(
+        Output("jobs-drawer-body", "children", allow_duplicate=True),
+        Input({"type": "drawer-action", "job_id": ALL, "kind": ALL}, "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def on_drawer_action(_clicks):
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        if not any((c or 0) > 0 for c in (_clicks or [])):
+            raise PreventUpdate
+        kind = triggered["kind"]
+        if kind == "retry":
+            backend.retry(triggered["job_id"])
+        elif kind == "cancel":
+            backend.cancel(triggered["job_id"])
+        # Force a redraw on the next poll by returning no_update; the next
+        # jobs-poll tick will refresh the drawer body.
+        return no_update
+
+    # ── workers slider ───────────────────────────────────────────────────
+    @app.callback(
+        Output("workers-slider", "value"),
+        Input("workers-slider", "value"),
+        prevent_initial_call=True,
+    )
+    def on_workers_slider(value):
+        if value is None:
+            raise PreventUpdate
+        return backend.set_worker_cap(int(value))
+
+    # ── debug reset ──────────────────────────────────────────────────────
+    @app.callback(
+        Output("jobs-badge", "children", allow_duplicate=True),
+        Input("debug-reset-btn", "n_clicks"),
+        prevent_initial_call=True,
+    )
+    def on_debug_reset(n):
+        if not n:
+            raise PreventUpdate
+        backend.debug_reset()
+        return "0"
+
+    # ── empty-state CTA for the center stage ─────────────────────────────
+    @app.callback(
+        Output("center-stage-cta", "children"),
+        Output("center-stage-cta", "className"),
+        Input("jobs-poll", "n_intervals"),
+        Input("selected-recording-id", "data"),
+        Input("selected-well-id", "data"),
+    )
+    def update_cta(_tick, recording_id, well_id):
+        if not recording_id or not well_id:
+            return [], "ax-cta hidden"
+        status = backend.get_status_for(recording_id, well_id)
+        if status in ("cached", "stale"):
+            return [], "ax-cta hidden"
+        rec = library.find_recording(recording_id)
+        sample = rec.sample if rec else recording_id
+        well_label = _well_id_to_name(well_id)
+        if status in ("queued", "running"):
+            active = next(
+                (j for j in backend.get_jobs_for(recording_id, well_id)
+                 if j.state in ("queued", "running")),
+                None,
+            )
+            pct = int((active.progress or 0.0) * 100) if active else 0
+            stage = (active.stage or "running") if active else "queued"
+            eta = _format_eta(active) if active else ""
+            return _cta_running_card(sample, well_label, pct, stage, eta), "ax-cta"
+        if status == "failed":
+            failed = next(
+                (j for j in backend.get_jobs_for(recording_id, well_id) if j.state == "failed"),
+                None,
+            )
+            error = (failed.error if failed else "unknown error") or "unknown error"
+            return _cta_failed_card(sample, well_label, error, recording_id, well_id), "ax-cta"
+        # idle
+        return _cta_idle_card(sample, well_label, recording_id, well_id), "ax-cta"
+
+
+# ── small renderers ────────────────────────────────────────────────────────
+
+
+def _cta_idle_card(sample: str, well_label: str, recording_id: str, well_id: str):
+    return html.Div(
+        className="ax-cta-card",
+        children=[
+            html.Div(
+                className="ax-cta-main",
+                children=[
+                    html.Div("No LFP cache for this well yet.", className="ax-cta-title"),
+                    html.Div(
+                        f"{sample} · well {well_label}. Hit Run on the library row to populate the viewer.",
+                        className="ax-cta-body",
+                    ),
+                    html.Div(
+                        f"Defaults: 0.5 – 300 Hz · CAR reference · pipeline {PIPELINE_VERSION}",
+                        className="ax-cta-defaults",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _cta_running_card(sample: str, well_label: str, pct: int, stage: str, eta: str):
+    return html.Div(
+        className="ax-cta-card",
+        children=[
+            html.Div(
+                className="ax-cta-main",
+                children=[
+                    html.Div(f"Running LFP analysis · {eta}".rstrip(" ·"), className="ax-cta-title"),
+                    html.Div(
+                        f"{sample} · well {well_label}. We'll auto-open the trace viewer once the cache lands. "
+                        f"Closing the tab won't stop the job.",
+                        className="ax-cta-body",
+                    ),
+                    html.Div(f"Stage: {stage}", className="ax-cta-defaults"),
+                    html.Div(
+                        className="pbar thick",
+                        children=html.Span(style={"width": f"{pct}%"}),
+                    ),
+                ],
+            ),
+            html.Div(
+                className="ax-cta-pct",
+                children=[
+                    html.Div(f"{pct}", className="ax-cta-pct-num"),
+                    html.Div("%", className="ax-cta-pct-unit"),
+                ],
+            ),
+        ],
+    )
+
+
+def _cta_failed_card(sample: str, well_label: str, error: str, recording_id: str, well_id: str):
+    return html.Div(
+        className="ax-cta-card",
+        children=[
+            html.Div(
+                className="ax-cta-main",
+                children=[
+                    html.Div("Last analysis failed.", className="ax-cta-title"),
+                    html.Div(
+                        f"{sample} · well {well_label}. {error}",
+                        className="ax-cta-body",
+                    ),
+                ],
+            ),
+        ],
+    )
+
+
+def _render_job_card(job, *, active: bool):
+    state_class = {
+        "running": "pill live",
+        "queued": "pill live",
+        "cached": "pill ok",
+        "failed": "pill err",
+        "cancelled": "pill idle",
+    }.get(job.state, "pill idle")
+    label = job.state
+    if job.state == "running":
+        label = f"running {int((job.progress or 0.0) * 100)}%"
+    title = job.recording_label or job.recording_id
+    well_label = job.well_label or job.well_id
+    subtitle = f"{title} · {well_label}"
+    actions: list = []
+    if job.state in ("queued", "running"):
+        actions.append(
+            html.Button(
+                "Cancel",
+                id={"type": "drawer-action", "job_id": job.id, "kind": "cancel"},
+                className="btn small",
+                n_clicks=0,
+            )
+        )
+    elif job.state == "failed":
+        actions.append(
+            html.Button(
+                "Retry",
+                id={"type": "drawer-action", "job_id": job.id, "kind": "retry"},
+                className="btn small",
+                n_clicks=0,
+            )
+        )
+    return html.Div(
+        className="ax-job",
+        children=[
+            html.Div(
+                className="ax-job-h",
+                children=[
+                    html.Div(subtitle, className="ax-job-name"),
+                    html.Span([html.I(className="dot"), html.Span(label)], className=state_class),
+                ],
+            ),
+            html.Div(
+                className="ax-job-meta",
+                children=[
+                    html.Span(job.hash, className="mono"),
+                    html.Span(_format_eta(job) if job.state == "running" else "", className="mono"),
+                ],
+            ),
+            html.Div(actions, className="ax-job-actions") if actions else None,
+        ],
+    )

@@ -126,6 +126,50 @@ class LibraryIndex:
         return cls(list(records.values()), mode="cache", root=str(root))
 
     @classmethod
+    def from_data_and_cache_root(
+        cls,
+        data_root,
+        cache_root,
+        *,
+        sample_override: str | None = None,
+    ) -> "LibraryIndex":
+        """Enumerate raw recordings and overlay cache state per well.
+
+        Used by the spawn-capable dashboard: every recording shows up (even
+        ones with no cache yet) so the user can hit Run; existing caches are
+        recognised so the viewer can open them instantly.
+        """
+        raw = cls.from_data_root(data_root, sample_override=sample_override)
+        cache_root = Path(cache_root)
+        for rec in raw.recordings:
+            for well in rec.wells:
+                cache_dir = (
+                    cache_root
+                    / rec.sample
+                    / rec.date
+                    / rec.plate
+                    / rec.scan
+                    / rec.run
+                    / well.well_id
+                )
+                manifest_path = cache_dir / "manifest.json"
+                if not manifest_path.exists():
+                    continue
+                try:
+                    manifest = json.loads(manifest_path.read_text())
+                except Exception:
+                    logger.exception("failed to read manifest: %s", manifest_path)
+                    continue
+                summary = manifest.get("summary") or {}
+                well.cache_dir = str(cache_dir)
+                well.sample_rate_hz = _safe_float(summary.get("sampling_frequency_hz"))
+                well.duration_sec = _safe_float(summary.get("duration_sec"))
+                well.num_recorded_electrodes = _safe_int(summary.get("num_recorded_electrodes"))
+                well.has_dashboard_data = (cache_dir / "dashboard" / "data" / "manifest.json").exists()
+            rec.cache_root = str(cache_root)
+        return cls(raw.recordings, mode="data+cache", root=str(Path(data_root)))
+
+    @classmethod
     def from_data_root(cls, data_root, *, sample_override: str | None = None) -> "LibraryIndex":
         root = Path(data_root)
         if not root.exists():

@@ -5,6 +5,11 @@ Class names mirror the design prototype at
 ``assets/styles.css`` applies directly. The pane structure follows the
 prototype: library (left), center column (controls + traces + meta), right
 pane (plate map + channel picker).
+
+When ``jobs_enabled=True`` (i.e., ``--data-root`` was passed), each library
+row gains a status pill + inline action button, the center stage gains an
+empty-state CTA overlay, and the top bar exposes a jobs drawer, params
+sheet, and "Compute" controls (workers slider).
 """
 
 from __future__ import annotations
@@ -13,7 +18,7 @@ from dataclasses import dataclass
 
 from dash import dcc, html
 
-from acute_slice_mea.library import LibraryIndex, RecordingEntry
+from acute_slice_mea.library import LibraryIndex, RecordingEntry, WellEntry
 
 PRESET_WINDOW_SECONDS = [1, 2, 5, 10, 30]
 DEFAULT_WINDOW_SECONDS = 5
@@ -22,6 +27,8 @@ DEFAULT_WINDOW_SECONDS = 5
 # are styled differently based on whether they appear in the recording.
 PLATE_ROWS = ["A", "B", "C", "D"]
 PLATE_COLS = [1, 2, 3, 4, 5, 6]
+
+JOBS_POLL_INTERVAL_MS = 2000
 
 
 @dataclass
@@ -32,30 +39,36 @@ class TopBarState:
     well_id: str | None
 
 
-def build_layout(library: LibraryIndex) -> html.Div:
-    return html.Div(
-        className="app",
-        children=[
-            _top_bar(library),
-            html.Div(
-                className="workspace",
-                children=[
-                    _library_pane(library),
-                    _center_column(),
-                    _right_pane(),
-                ],
-            ),
-            # Hidden stores
-            dcc.Store(id="selected-recording-id"),
-            dcc.Store(id="selected-well-id"),
-            dcc.Store(id="selected-channels", data=[]),
-            dcc.Store(id="time-window", data=[0.0, float(DEFAULT_WINDOW_SECONDS)]),
-            dcc.Store(id="gain", data=1.0),
-            # Bumped whenever the active (recording, well) changes so downstream
-            # callbacks can flush their per-well caches.
-            dcc.Store(id="well-version", data=0),
-        ],
-    )
+def build_layout(library: LibraryIndex, *, jobs_enabled: bool = False) -> html.Div:
+    children: list = [
+        _top_bar(library, jobs_enabled=jobs_enabled),
+        html.Div(
+            className="workspace",
+            children=[
+                _library_pane(library, jobs_enabled=jobs_enabled),
+                _center_column(jobs_enabled=jobs_enabled),
+                _right_pane(),
+            ],
+        ),
+        # Hidden stores
+        dcc.Store(id="selected-recording-id"),
+        dcc.Store(id="selected-well-id"),
+        dcc.Store(id="selected-channels", data=[]),
+        dcc.Store(id="time-window", data=[0.0, float(DEFAULT_WINDOW_SECONDS)]),
+        dcc.Store(id="gain", data=1.0),
+        dcc.Store(id="well-version", data=0),
+    ]
+    if jobs_enabled:
+        children.extend(
+            [
+                dcc.Interval(id="jobs-poll", interval=JOBS_POLL_INTERVAL_MS),
+                dcc.Store(id="jobs-drawer-open", data=False),
+                dcc.Store(id="params-sheet-state", data=None),
+                _jobs_drawer(),
+                _params_sheet(),
+            ]
+        )
+    return html.Div(className="app", children=children)
 
 
 # =============================================================================
@@ -63,7 +76,36 @@ def build_layout(library: LibraryIndex) -> html.Div:
 # =============================================================================
 
 
-def _top_bar(library: LibraryIndex) -> html.Div:
+def _top_bar(library: LibraryIndex, *, jobs_enabled: bool) -> html.Div:
+    right_children: list = [
+        html.Span(
+            id="status-chip",
+            className="status-chip",
+            children=[
+                html.I(className="dot dot-live"),
+                html.Span("0 traces on screen", id="status-text"),
+            ],
+        ),
+        html.Span(
+            f"{len(library.recordings)} recording(s)",
+            className="status-chip",
+        ),
+    ]
+    if jobs_enabled:
+        right_children.extend(
+            [
+                html.Button(
+                    id="jobs-drawer-toggle",
+                    className="topbar-btn",
+                    n_clicks=0,
+                    children=[
+                        html.Span("Jobs", className="topbar-btn-label"),
+                        html.Span("0", id="jobs-badge", className="topbar-badge"),
+                    ],
+                ),
+                html.Div(className="topbar-compute", children=_compute_controls()),
+            ]
+        )
     return html.Div(
         className="topbar",
         children=[
@@ -85,25 +127,34 @@ def _top_bar(library: LibraryIndex) -> html.Div:
                 ],
             ),
             html.Div(id="crumbs-area", className="crumbs"),
-            html.Div(
-                className="topbar-right",
-                children=[
-                    html.Span(
-                        id="status-chip",
-                        className="status-chip",
-                        children=[
-                            html.I(className="dot dot-live"),
-                            html.Span("0 traces on screen", id="status-text"),
-                        ],
-                    ),
-                    html.Span(
-                        f"{len(library.recordings)} recording(s)",
-                        className="status-chip",
-                    ),
-                ],
-            ),
+            html.Div(className="topbar-right", children=right_children),
         ],
     )
+
+
+def _compute_controls() -> list:
+    """Workers slider + cache total readout. Visible only when jobs_enabled."""
+    return [
+        html.Span("Workers", className="compute-label"),
+        dcc.Slider(
+            id="workers-slider",
+            min=1,
+            max=1,
+            step=1,
+            value=1,
+            marks={1: "1"},
+            tooltip={"placement": "bottom"},
+            className="compute-slider",
+        ),
+        html.Span(id="cache-total-readout", className="muted compute-readout", children="—"),
+        html.Button(
+            "Reset jobs",
+            id="debug-reset-btn",
+            className="topbar-btn topbar-btn-ghost",
+            n_clicks=0,
+            title="Cancel all jobs and wipe the jobs directory (debug).",
+        ),
+    ]
 
 
 # =============================================================================
@@ -111,7 +162,7 @@ def _top_bar(library: LibraryIndex) -> html.Div:
 # =============================================================================
 
 
-def _library_pane(library: LibraryIndex) -> html.Aside:
+def _library_pane(library: LibraryIndex, *, jobs_enabled: bool) -> html.Aside:
     grouped = library.grouped_by_date()
     return html.Aside(
         className="pane pane-library",
@@ -138,7 +189,7 @@ def _library_pane(library: LibraryIndex) -> html.Aside:
             html.Div(
                 id="library-list",
                 className="lib-scroll",
-                children=[_library_group(date, items) for date, items in grouped]
+                children=[_library_group(date, items, jobs_enabled=jobs_enabled) for date, items in grouped]
                 or [html.Div("No recordings found in cache.", className="empty-state-s", style={"padding": "24px"})],
             ),
             html.Div(
@@ -152,7 +203,7 @@ def _library_pane(library: LibraryIndex) -> html.Aside:
     )
 
 
-def _library_group(date: str, items: list[RecordingEntry]) -> html.Div:
+def _library_group(date: str, items: list[RecordingEntry], *, jobs_enabled: bool) -> html.Div:
     return html.Div(
         className="lib-group",
         children=[
@@ -162,15 +213,15 @@ def _library_group(date: str, items: list[RecordingEntry]) -> html.Div:
             ),
             html.Ul(
                 className="lib-list",
-                children=[html.Li(_library_item(rec)) for rec in items],
+                children=[html.Li(_library_item(rec, jobs_enabled=jobs_enabled)) for rec in items],
             ),
         ],
     )
 
 
-def _library_item(rec: RecordingEntry) -> html.Button:
+def _library_item(rec: RecordingEntry, *, jobs_enabled: bool) -> html.Div:
     scan_class = "lib-scan lib-scan-network" if rec.scan.lower() == "network" else "lib-scan"
-    return html.Button(
+    select_btn = html.Button(
         id={"type": "lib-item", "recording_id": rec.recording_id},
         className="lib-item",
         n_clicks=0,
@@ -195,6 +246,52 @@ def _library_item(rec: RecordingEntry) -> html.Button:
             ),
         ],
     )
+    if not jobs_enabled:
+        return select_btn
+
+    # Phase-1 scope: the row pill + Run button target the recording's first
+    # well only. Multi-well per-recording batch is deferred — see the plan.
+    target_well: WellEntry | None = rec.wells[0] if rec.wells else None
+    well_id = target_well.well_id if target_well else "—"
+    return html.Div(
+        className="lib-row-wrap",
+        children=[
+            select_btn,
+            html.Div(
+                className="lib-cache",
+                children=[
+                    html.Span(
+                        id={
+                            "type": "lib-status-pill",
+                            "recording_id": rec.recording_id,
+                            "well_id": well_id,
+                        },
+                        className="pill idle",
+                        children=[html.I(className="dot"), html.Span("idle")],
+                    ),
+                    html.Div(
+                        id={
+                            "type": "lib-progress",
+                            "recording_id": rec.recording_id,
+                            "well_id": well_id,
+                        },
+                        className="pbar",
+                        children=html.Span(style={"width": "0%"}),
+                    ),
+                    html.Button(
+                        "Run",
+                        id={
+                            "type": "lib-action",
+                            "recording_id": rec.recording_id,
+                            "well_id": well_id,
+                        },
+                        n_clicks=0,
+                        className="btn small primary",
+                    ),
+                ],
+            ),
+        ],
+    )
 
 
 # =============================================================================
@@ -202,7 +299,18 @@ def _library_item(rec: RecordingEntry) -> html.Button:
 # =============================================================================
 
 
-def _center_column() -> html.Div:
+def _center_column(*, jobs_enabled: bool) -> html.Div:
+    stage_children: list = [
+        dcc.Graph(
+            id="traces-graph",
+            config={"displaylogo": False, "displayModeBar": "hover"},
+            style={"height": "100%", "minHeight": "320px"},
+        ),
+    ]
+    if jobs_enabled:
+        stage_children.append(
+            html.Div(id="center-stage-cta", className="ax-cta hidden", children=[]),
+        )
     return html.Div(
         className="center-col",
         children=[
@@ -210,11 +318,7 @@ def _center_column() -> html.Div:
             html.Div(
                 id="center-stage",
                 className="center-stage",
-                children=dcc.Graph(
-                    id="traces-graph",
-                    config={"displaylogo": False, "displayModeBar": "hover"},
-                    style={"height": "100%", "minHeight": "320px"},
-                ),
+                children=stage_children,
             ),
             html.Div(
                 className="scrubber",
@@ -370,6 +474,138 @@ def _channel_picker() -> html.Div:
             html.Div(
                 "Box- or lasso-select electrodes on the chip. Scroll to zoom.",
                 className="chgrid-hint",
+            ),
+        ],
+    )
+
+
+# =============================================================================
+# Jobs drawer (right slide-in)
+# =============================================================================
+
+
+def _jobs_drawer() -> html.Div:
+    return html.Div(
+        id="jobs-drawer",
+        className="ax-drawer hidden",
+        children=[
+            html.Div(
+                className="ax-drawer-head",
+                children=[
+                    html.Div("Jobs", className="ax-drawer-title"),
+                    html.Button("×", id="jobs-drawer-close", className="ax-drawer-close", n_clicks=0),
+                ],
+            ),
+            html.Div(id="jobs-drawer-body", className="ax-drawer-body", children=[]),
+        ],
+    )
+
+
+# =============================================================================
+# Params sheet (modal)
+# =============================================================================
+
+
+def _params_sheet() -> html.Div:
+    return html.Div(
+        id="params-sheet",
+        className="ax-sheet hidden",
+        children=[
+            html.Div(
+                className="ax-sheet-card",
+                children=[
+                    html.Div(
+                        className="ax-sheet-head",
+                        children=[
+                            html.Div("Run LFP analysis", className="ax-sheet-title"),
+                            html.Div(id="params-sheet-subtitle", className="ax-sheet-sub"),
+                        ],
+                    ),
+                    html.Div(
+                        className="ax-sheet-body",
+                        children=[
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Bandpass low (Hz)", className="ax-sheet-label"),
+                                    dcc.Input(
+                                        id="params-band-low",
+                                        type="number",
+                                        value=0.5,
+                                        min=0.01,
+                                        max=50,
+                                        step=0.1,
+                                        className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Bandpass high (Hz)", className="ax-sheet-label"),
+                                    dcc.Input(
+                                        id="params-band-high",
+                                        type="number",
+                                        value=300,
+                                        min=10,
+                                        max=5000,
+                                        step=1,
+                                        className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Reference", className="ax-sheet-label"),
+                                    dcc.RadioItems(
+                                        id="params-reference",
+                                        options=[
+                                            {"label": "Common avg. (CAR)", "value": "CAR"},
+                                            {"label": "None", "value": "none"},
+                                        ],
+                                        value="CAR",
+                                        className="ax-sheet-radio",
+                                        labelStyle={"marginRight": "12px"},
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Decimation", className="ax-sheet-label"),
+                                    dcc.Input(
+                                        id="params-decimation",
+                                        type="number",
+                                        value=1,
+                                        min=1,
+                                        max=16,
+                                        step=1,
+                                        className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                id="params-overwrite-row",
+                                className="ax-sheet-row hidden",
+                                children=dcc.Checklist(
+                                    id="params-overwrite",
+                                    options=[{"label": "  Overwrite previous result", "value": "yes"}],
+                                    value=[],
+                                    className="ax-sheet-overwrite",
+                                ),
+                            ),
+                            html.Div(id="params-sheet-error", className="ax-sheet-error hidden"),
+                        ],
+                    ),
+                    html.Div(
+                        className="ax-sheet-foot",
+                        children=[
+                            html.Button("Cancel", id="params-cancel", className="btn", n_clicks=0),
+                            html.Button("Submit", id="params-submit", className="btn primary", n_clicks=0),
+                        ],
+                    ),
+                ],
             ),
         ],
     )

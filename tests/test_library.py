@@ -78,3 +78,44 @@ def test_find_returns_none_for_unknown_well(tmp_path):
     index = LibraryIndex([], mode="cache", root=str(tmp_path))
     assert index.find("missing", "well000") is None
     assert index.find_recording("missing") is None
+
+
+def test_data_and_cache_overlay_marks_cached_wells(tmp_path, monkeypatch):
+    """Merged factory surfaces every raw recording, overlays cache metadata."""
+    sample_root = tmp_path / "MeaSlices_Example"
+    raw_path = sample_root / "260408" / "16719" / "ActivityScan" / "000001" / "data.raw.h5"
+    raw_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(b"")
+
+    cache_root = tmp_path / "cache"
+    bundle = (
+        cache_root
+        / "MeaSlices_Example"
+        / "260408"
+        / "16719"
+        / "ActivityScan"
+        / "000001"
+        / "well000"
+    )
+    bundle.mkdir(parents=True)
+    summary = {
+        "well_id": "well000",
+        "data_path": str(raw_path),
+        "sampling_frequency_hz": 20000.0,
+        "duration_sec": 300.0,
+        "num_recorded_electrodes": 256,
+    }
+    (bundle / "manifest.json").write_text(json.dumps({"summary": summary, "files": {}}))
+
+    import acute_slice_mea.library as lib
+
+    monkeypatch.setattr(lib, "_list_wells_from_h5", lambda p: ["well000", "well001"])
+    index = LibraryIndex.from_data_and_cache_root(sample_root, cache_root)
+    assert index.mode == "data+cache"
+    rec = index.recordings[0]
+    cached_well = next(w for w in rec.wells if w.well_id == "well000")
+    fresh_well = next(w for w in rec.wells if w.well_id == "well001")
+    assert cached_well.cache_dir is not None
+    assert cached_well.duration_sec == 300.0
+    assert cached_well.num_recorded_electrodes == 256
+    assert fresh_well.cache_dir is None
