@@ -33,6 +33,7 @@ class AnalysisConfig:
     data_path: str
     well_id: str
     output_dir: str
+    rec_name: str | None = None
     lfp_low_hz: float = 0.5
     lfp_high_hz: float = 300
     spike_low_hz: float = 300
@@ -85,7 +86,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         si.set_global_job_kwargs(chunk_duration=config.spikeinterface_chunk_duration)
 
     _log_verbose(config, "Loading recording")
-    raw = load_maxwell_recording(config.data_path, config.well_id)
+    raw = load_maxwell_recording(config.data_path, config.well_id, rec_name=config.rec_name)
     _log_verbose(config, "Preparing recordings")
     recordings = prepare_recordings(
         raw,

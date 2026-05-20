@@ -63,7 +63,11 @@ def test_raw_mode_lists_recordings_when_h5_files_present(tmp_path, monkeypatch):
     # Stub the wells listing to avoid touching real HDF5.
     import acute_slice_mea.library as lib
 
-    monkeypatch.setattr(lib, "_list_wells_from_h5", lambda p: ["well000", "well001"])
+    monkeypatch.setattr(
+        lib,
+        "_list_wells_and_recs_from_h5",
+        lambda p: [("well000", None), ("well001", None)],
+    )
     index = LibraryIndex.from_data_root(sample_root)
     assert index.mode == "raw"
     assert len(index.recordings) == 1

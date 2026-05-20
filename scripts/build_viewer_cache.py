@@ -35,6 +35,7 @@ def build_cache_for(
     recording: RecordingEntry,
     well_id: str,
     cache_root: Path,
+    rec_name: str | None = None,
     force: bool = False,
     n_jobs: int = 1,
     progress: bool = True,
@@ -45,6 +46,9 @@ def build_cache_for(
     export_dashboard_data: bool = True,
 ) -> Path:
     """Run ``run_analysis`` for one (recording, well); return the cache dir."""
+    # recording.run already encodes /{rec_name} for multi-rec entries, so the
+    # cache path naturally lands at .../scan/run/rec_name/well_id without any
+    # extra joining here.
     out_dir = cache_root / recording.sample / recording.date / recording.plate / recording.scan / recording.run / well_id
     manifest = out_dir / "manifest.json"
     if manifest.exists() and not force:
@@ -55,6 +59,7 @@ def build_cache_for(
         data_path=recording.raw_path or "",
         well_id=well_id,
         output_dir=str(out_dir),
+        rec_name=rec_name,
         n_jobs=n_jobs,
         progress=progress,
         verbose=True,
@@ -130,6 +135,7 @@ def main(argv: list[str] | None = None) -> int:
                     recording=rec,
                     well_id=well.well_id,
                     cache_root=args.cache_root,
+                    rec_name=well.rec_name,
                     force=args.force,
                     n_jobs=args.n_jobs,
                     progress=not args.quiet,

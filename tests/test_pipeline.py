@@ -27,7 +27,7 @@ def test_run_analysis_writes_verbose_progress_to_stderr(monkeypatch, capsys, tmp
         }
     )
 
-    monkeypatch.setattr(pipeline, "load_maxwell_recording", lambda data_path, well_id: FakeRecording())
+    monkeypatch.setattr(pipeline, "load_maxwell_recording", lambda data_path, well_id, rec_name=None: FakeRecording())
     monkeypatch.setattr(pipeline, "prepare_recordings", lambda raw, **kwargs: recordings)
     monkeypatch.setattr(pipeline, "build_electrode_table", lambda probe, recording: electrodes)
 

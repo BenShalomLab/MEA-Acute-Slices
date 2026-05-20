@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 
-def load_maxwell_recording(data_path, well_id):
-    """Load a Maxwell raw HDF5 recording for one well."""
+def load_maxwell_recording(data_path, well_id, rec_name=None):
+    """Load a Maxwell raw HDF5 recording for one (well, rec_name)."""
     import spikeinterface.extractors as se
 
-    return se.read_maxwell(str(data_path), stream_id=str(well_id))
+    return se.read_maxwell(str(data_path), stream_id=str(well_id), rec_name=rec_name)
 
 
 def prepare_recordings(

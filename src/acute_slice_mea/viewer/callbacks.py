@@ -460,7 +460,10 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         rms = entry.get("rms_uv")
         intensity = 0.0 if rms is None or rms_max == 0 else min(1.0, float(rms) / rms_max)
         colors.append(_interp_color(intensity))
-        sizes.append(5 + 7 * intensity)
+        # Pixel sizing. At chip-fit zoom the 17.5 μm pitch is ~3 px wide, so
+        # markers must stay tiny or they drown the grid. Selected state below
+        # bumps to 6 px with an outline so the highlight reads at any zoom.
+        sizes.append(2 + 2 * intensity)
 
     fig.add_trace(
         go.Scattergl(
@@ -475,7 +478,9 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             ),
             hovertemplate="E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>",
             selectedpoints=[i for i, eid in enumerate(custom) if eid in selected_set] or None,
-            selected=dict(marker=dict(color=TRACE_COLOR, size=14)),
+            # scattergl.selected.Marker only supports color/opacity/size — no
+            # line/outline. Use color + a modest size bump for the highlight.
+            selected=dict(marker=dict(color=TRACE_COLOR, size=6)),
             unselected=dict(marker=dict(opacity=0.55)),
         )
     )

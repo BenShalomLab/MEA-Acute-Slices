@@ -37,6 +37,7 @@ class WellEntry:
     """One well within one recording."""
 
     well_id: str
+    rec_name: str | None = None   # Maxwell sub-recording id (rec0000…); None when single-rec
     cache_dir: str | None = None  # populated in cache mode
     raw_path: str | None = None   # populated in raw mode
     sample_rate_hz: float | None = None
@@ -136,19 +137,39 @@ class LibraryIndex:
             raw_path = run_dir.path / "data.raw.h5"
             if not raw_path.exists():
                 continue
-            wells = _list_wells_from_h5(raw_path)
-            records.append(
-                RecordingEntry(
-                    recording_id=run_dir.recording_id,
-                    sample=run_dir.sample,
-                    date=run_dir.date,
-                    plate=run_dir.plate,
-                    scan=run_dir.scan,
-                    run=run_dir.run,
-                    raw_path=str(raw_path),
-                    wells=[WellEntry(well_id=w, raw_path=str(raw_path)) for w in wells],
+            wells_recs = _list_wells_and_recs_from_h5(raw_path)
+            if not wells_recs:
+                continue
+            # Group (well_id, rec_name) pairs by rec_name. Single-rec files
+            # collapse to one RecordingEntry with rec_name=None (legacy layout).
+            # Multi-rec files expand to one RecordingEntry per rec_name with
+            # /{rec_name} appended to run and recording_id so the viewer keys
+            # them distinctly.
+            by_rec: dict[str | None, list[str]] = {}
+            for well_id, rec_name in wells_recs:
+                by_rec.setdefault(rec_name, []).append(well_id)
+            for rec_name, well_ids in by_rec.items():
+                if rec_name is None:
+                    actual_run = run_dir.run
+                    recording_id = run_dir.recording_id
+                else:
+                    actual_run = f"{run_dir.run}/{rec_name}"
+                    recording_id = f"{run_dir.recording_id}/{rec_name}"
+                records.append(
+                    RecordingEntry(
+                        recording_id=recording_id,
+                        sample=run_dir.sample,
+                        date=run_dir.date,
+                        plate=run_dir.plate,
+                        scan=run_dir.scan,
+                        run=actual_run,
+                        raw_path=str(raw_path),
+                        wells=[
+                            WellEntry(well_id=w, rec_name=rec_name, raw_path=str(raw_path))
+                            for w in sorted(well_ids)
+                        ],
+                    )
                 )
-            )
         return cls(records, mode="raw", root=str(root))
 
     # -- queries ------------------------------------------------------
@@ -207,9 +228,18 @@ def _entry_from_cache_manifest(manifest_path: Path, *, cache_root: Path) -> dict
     parts = _parse_recording_id(Path(data_path))
     bundle_dir = manifest_path.parent
 
+    # Multi-recording files: rec_name was persisted in the summary by
+    # AnalysisConfig. Fold it into run/recording_id so the cache-mode index
+    # matches the raw-mode layout (one logical recording per rec_name).
+    rec_name = summary.get("rec_name") or None
+    if rec_name:
+        parts["run"] = f"{parts['run']}/{rec_name}"
+        parts["recording_id"] = f"{parts['recording_id']}/{rec_name}"
+
     dashboard_manifest = bundle_dir / "dashboard" / "data" / "manifest.json"
     well = WellEntry(
         well_id=str(well_id),
+        rec_name=rec_name,
         cache_dir=str(bundle_dir),
         raw_path=str(data_path),
         sample_rate_hz=_safe_float(summary.get("sampling_frequency_hz")),
@@ -330,7 +360,17 @@ def _iter_run_dirs(root: Path, *, sample_override: str | None) -> Iterator[_RunD
                         )
 
 
-def _list_wells_from_h5(raw_path: Path) -> list[str]:
+def _list_wells_and_recs_from_h5(raw_path: Path) -> list[tuple[str, str | None]]:
+    """Enumerate (well_id, rec_name) pairs in a Maxwell h5 file.
+
+    Mirrors ``neo.rawio.MaxwellRawIO._parse_header``: each well group under
+    ``h5["wells"]`` has one or more ``rec*`` children. When the file contains
+    only a single rec_name across all wells we collapse it to ``rec_name=None``
+    so single-rec recordings (e.g., Network) keep the legacy cache path.
+    Multi-rec files (ActivityScan, MaxTwo plates with per-row recording ids)
+    yield one tuple per (well, rec) combination — callers expand them into
+    distinct RecordingEntries.
+    """
     try:
         import h5py
     except ImportError:  # pragma: no cover
@@ -341,7 +381,20 @@ def _list_wells_from_h5(raw_path: Path) -> list[str]:
             wells = h5.get("wells")
             if wells is None:
                 return []
-            return sorted(wells.keys())
+            pairs: list[tuple[str, str]] = []
+            all_rec_names: set[str] = set()
+            for well_id in sorted(wells.keys()):
+                rec_group = wells[well_id]
+                rec_names = sorted(rec_group.keys()) if hasattr(rec_group, "keys") else []
+                if not rec_names:
+                    continue
+                for rec_name in rec_names:
+                    pairs.append((well_id, rec_name))
+                    all_rec_names.add(rec_name)
     except (OSError, KeyError):
         logger.warning("failed to read wells from %s", raw_path, exc_info=True)
         return []
+    if len(all_rec_names) <= 1:
+        # Single rec_name across the whole file → preserve legacy layout.
+        return [(well_id, None) for well_id, _ in pairs]
+    return [(well_id, rec_name) for well_id, rec_name in pairs]
