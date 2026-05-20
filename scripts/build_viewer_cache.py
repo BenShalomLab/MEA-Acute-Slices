@@ -38,6 +38,11 @@ def build_cache_for(
     force: bool = False,
     n_jobs: int = 1,
     progress: bool = True,
+    compute_spectrum: bool = True,
+    compute_trace_preview: bool = True,
+    compute_bursts: bool = True,
+    export_probe_geometry: bool = True,
+    export_dashboard_data: bool = True,
 ) -> Path:
     """Run ``run_analysis`` for one (recording, well); return the cache dir."""
     out_dir = cache_root / recording.sample / recording.date / recording.plate / recording.scan / recording.run / well_id
@@ -53,6 +58,11 @@ def build_cache_for(
         n_jobs=n_jobs,
         progress=progress,
         verbose=True,
+        compute_spectrum=compute_spectrum,
+        compute_trace_preview=compute_trace_preview,
+        compute_bursts=compute_bursts,
+        export_probe_geometry=export_probe_geometry,
+        export_dashboard_data=export_dashboard_data,
     )
     started = perf_counter()
     run_analysis(config)
@@ -79,7 +89,23 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--n-jobs", type=int, default=1)
     parser.add_argument("--force", action="store_true", help="Re-run even when manifest.json exists.")
     parser.add_argument("--quiet", action="store_true", help="Disable per-window progress bars.")
+    parser.add_argument(
+        "--minimal",
+        action="store_true",
+        help="Compute only LFP band power and per-electrode RMS; skip spectrum, trace preview, bursts, probe geometry, and dashboard export.",
+    )
+    parser.add_argument("--no-spectrum", action="store_true", help="Skip Welch spectrum summary.")
+    parser.add_argument("--no-trace-preview", action="store_true", help="Skip trace preview computation.")
+    parser.add_argument("--no-bursts", action="store_true", help="Skip network-burst detection.")
+    parser.add_argument("--no-probe-geometry", action="store_true", help="Skip probe geometry export.")
+    parser.add_argument("--no-dashboard", action="store_true", help="Skip dashboard JSON export.")
     args = parser.parse_args(argv)
+
+    compute_spectrum = not (args.no_spectrum or args.minimal)
+    compute_trace_preview = not (args.no_trace_preview or args.minimal)
+    compute_bursts = not (args.no_bursts or args.minimal)
+    export_probe_geometry = not (args.no_probe_geometry or args.minimal)
+    export_dashboard_data = not (args.no_dashboard or args.minimal)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
@@ -107,6 +133,11 @@ def main(argv: list[str] | None = None) -> int:
                     force=args.force,
                     n_jobs=args.n_jobs,
                     progress=not args.quiet,
+                    compute_spectrum=compute_spectrum,
+                    compute_trace_preview=compute_trace_preview,
+                    compute_bursts=compute_bursts,
+                    export_probe_geometry=export_probe_geometry,
+                    export_dashboard_data=export_dashboard_data,
                 )
             except Exception:
                 total_failures += 1

@@ -26,8 +26,8 @@ def save_cache_bundle(
     summary: dict,
     electrodes: pd.DataFrame,
     band_power: pd.DataFrame,
-    spectrum: dict[str, np.ndarray],
-    trace_preview: dict[str, np.ndarray],
+    spectrum: dict[str, np.ndarray] | None = None,
+    trace_preview: dict[str, np.ndarray] | None = None,
     bursts: list[dict] | None = None,
     probe_geometry: dict | None = None,
 ) -> dict:
@@ -40,18 +40,20 @@ def save_cache_bundle(
     electrodes_path = output_dir / "electrodes.csv"
     electrodes.to_csv(electrodes_path, index=False)
     band_power_path = _write_table(band_power, output_dir / "lfp_band_power")
-    spectrum_path = output_dir / "spectrum_summary.npz"
-    trace_preview_path = output_dir / "trace_preview.npz"
-    np.savez_compressed(spectrum_path, **spectrum)
-    np.savez_compressed(trace_preview_path, **trace_preview)
 
     files = {
         "summary": str(summary_path),
         "electrodes": str(electrodes_path),
         "band_power": str(band_power_path),
-        "spectrum": str(spectrum_path),
-        "trace_preview": str(trace_preview_path),
     }
+    if spectrum is not None:
+        spectrum_path = output_dir / "spectrum_summary.npz"
+        np.savez_compressed(spectrum_path, **spectrum)
+        files["spectrum"] = str(spectrum_path)
+    if trace_preview is not None:
+        trace_preview_path = output_dir / "trace_preview.npz"
+        np.savez_compressed(trace_preview_path, **trace_preview)
+        files["trace_preview"] = str(trace_preview_path)
     if bursts is not None:
         bursts_path = output_dir / "bursts.json"
         bursts_path.write_text(json.dumps(bursts, separators=(",", ":")))

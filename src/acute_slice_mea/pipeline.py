@@ -49,6 +49,8 @@ class AnalysisConfig:
     preview_electrode_ids: list[int] | None = field(default=None)
     dashboard_max_points_per_electrode: int = 20000
     export_dashboard_data: bool = True
+    compute_spectrum: bool = True
+    compute_trace_preview: bool = True
     compute_bursts: bool = True
     burst_detection_max_sec: float = 120.0
     export_probe_geometry: bool = True
@@ -120,26 +122,34 @@ def run_analysis(config: AnalysisConfig) -> dict:
     preview_electrode_ids = config.preview_electrode_ids
     if preview_electrode_ids is None and config.preview_max_electrodes is not None:
         preview_electrode_ids = recorded["electrode_id"].astype(int).head(config.preview_max_electrodes).tolist()
-    _log_verbose(config, "Computing spectrum summary")
-    spectrum = compute_welch_spectrum_summary(
-        recordings["lfp"],
-        channel_ids=recorded["channel_id"].tolist(),
-        duration_sec=config.spectrum_duration_sec,
-        max_freq_hz=config.spectrum_max_freq_hz,
-        welch_segment_sec=config.welch_segment_sec,
-        n_jobs=config.n_jobs,
-        channel_chunk_size=config.channel_chunk_size,
-        progress=config.progress,
-    )
-    _log_verbose(config, "Computing trace preview")
-    trace_preview = compute_trace_preview(
-        recordings,
-        electrode_table=electrodes,
-        electrode_ids=preview_electrode_ids,
-        start_sec=config.preview_start_sec,
-        duration_sec=config.preview_duration_sec,
-        max_points=config.preview_max_points,
-    )
+
+    spectrum: dict | None = None
+    if config.compute_spectrum:
+        _log_verbose(config, "Computing spectrum summary")
+        spectrum = compute_welch_spectrum_summary(
+            recordings["lfp"],
+            channel_ids=recorded["channel_id"].tolist(),
+            duration_sec=config.spectrum_duration_sec,
+            max_freq_hz=config.spectrum_max_freq_hz,
+            welch_segment_sec=config.welch_segment_sec,
+            n_jobs=config.n_jobs,
+            channel_chunk_size=config.channel_chunk_size,
+            progress=config.progress,
+        )
+
+    trace_preview: dict | None = None
+    if config.compute_trace_preview:
+        _log_verbose(config, "Computing trace preview")
+        trace_preview = compute_trace_preview(
+            recordings,
+            electrode_table=electrodes,
+            electrode_ids=preview_electrode_ids,
+            start_sec=config.preview_start_sec,
+            duration_sec=config.preview_duration_sec,
+            max_points=config.preview_max_points,
+        )
+    else:
+        preview_electrode_ids = None
 
     bursts: list[dict] | None = None
     if config.compute_bursts:
@@ -194,9 +204,15 @@ def run_analysis(config: AnalysisConfig) -> dict:
     _log_verbose(config, "Writing figures")
     figure_paths = {
         "band_power": str(write_band_power_html(band_power, figures_dir / "lfp_band_power.html")),
-        "trace_preview": str(write_trace_preview_html(trace_preview, figures_dir / "trace_preview_raw_lfp_spike.html")),
-        "spectrum": str(write_spectrum_summary_html(spectrum, figures_dir / "lfp_spectrum_summary.html")),
     }
+    if trace_preview is not None:
+        figure_paths["trace_preview"] = str(
+            write_trace_preview_html(trace_preview, figures_dir / "trace_preview_raw_lfp_spike.html")
+        )
+    if spectrum is not None:
+        figure_paths["spectrum"] = str(
+            write_spectrum_summary_html(spectrum, figures_dir / "lfp_spectrum_summary.html")
+        )
     manifest["files"]["figures"] = figure_paths
     if config.export_dashboard_data:
         _log_verbose(config, "Exporting dashboard data")
