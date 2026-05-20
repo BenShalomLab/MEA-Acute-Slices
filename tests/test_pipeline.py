@@ -42,11 +42,16 @@ def test_run_analysis_writes_verbose_progress_to_stderr(monkeypatch, capsys, tmp
     monkeypatch.setattr(pipeline, "compute_lfp_band_power_over_time", fake_band_power)
     monkeypatch.setattr(pipeline, "compute_welch_spectrum_summary", fake_spectrum)
     monkeypatch.setattr(pipeline, "compute_trace_preview", lambda *args, **kwargs: {"time_sec": np.array([0.0])})
-    monkeypatch.setattr(
-        pipeline,
-        "save_cache_bundle",
-        lambda output_dir, **kwargs: {"summary": kwargs["summary"], "files": {}},
-    )
+    monkeypatch.setattr(pipeline, "compute_bursts_from_recording", lambda *args, **kwargs: [{"center_s": 1.0}])
+    monkeypatch.setattr(pipeline, "compute_lfp_rms_per_electrode", lambda *args, **kwargs: {10: 12.5, 20: 8.0})
+    monkeypatch.setattr(pipeline, "build_probe_geometry", lambda electrodes: {"cols": 220, "rows": 120, "routed": []})
+    saved: dict = {}
+
+    def fake_save(output_dir, **kwargs):
+        saved.update(kwargs)
+        return {"summary": kwargs["summary"], "files": {}}
+
+    monkeypatch.setattr(pipeline, "save_cache_bundle", fake_save)
     monkeypatch.setattr(pipeline, "write_band_power_html", lambda band_power, path: path)
     monkeypatch.setattr(pipeline, "write_trace_preview_html", lambda trace_preview, path: path)
     monkeypatch.setattr(pipeline, "write_spectrum_summary_html", lambda spectrum, path: path)
@@ -67,7 +72,13 @@ def test_run_analysis_writes_verbose_progress_to_stderr(monkeypatch, capsys, tmp
     assert calls == {"band_power_progress": True, "spectrum_progress": True}
     assert manifest["summary"]["progress"] is True
     assert manifest["summary"]["verbose"] is True
+    assert manifest["summary"]["num_bursts"] == 1
+    assert saved["bursts"] == [{"center_s": 1.0}]
+    assert saved["probe_geometry"] == {"cols": 220, "rows": 120, "routed": []}
+    assert "rms_uv" in saved["electrodes"].columns
     assert captured.out == ""
     assert "Loading recording" in captured.err
     assert "Computing LFP band power" in captured.err
+    assert "Detecting network bursts" in captured.err
+    assert "Building probe geometry" in captured.err
     assert "Writing manifest" in captured.err

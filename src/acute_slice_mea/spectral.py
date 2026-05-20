@@ -263,6 +263,33 @@ def compute_welch_spectrum_summary(
     }
 
 
+def compute_lfp_rms_per_electrode(
+    lfp_recording,
+    electrode_table,
+    *,
+    electrode_ids=None,
+    duration_sec: float = 10.0,
+    return_scaled: bool = True,
+) -> dict[int, float]:
+    """Per-electrode RMS (µV) over the first ``duration_sec`` of the LFP view.
+
+    Drives the heat coloring in the viewer's channel picker; cheap because the
+    LFP is already a downsampled, common-referenced view.
+    """
+    fs = float(lfp_recording.get_sampling_frequency())
+    num_samples = int(lfp_recording.get_num_samples())
+    end_frame = min(num_samples, int(round(float(duration_sec) * fs)))
+    if end_frame <= 0:
+        return {}
+    electrode_ids_resolved, channel_ids = recorded_electrode_channels(electrode_table, electrode_ids)
+    traces = get_traces_safe(lfp_recording, 0, end_frame, channel_ids, return_scaled=return_scaled)
+    arr = np.asarray(traces, dtype=float)
+    if arr.ndim == 1:
+        arr = arr[:, np.newaxis]
+    rms = np.sqrt(np.mean(arr * arr, axis=0))
+    return {int(eid): float(value) for eid, value in zip(electrode_ids_resolved, rms)}
+
+
 def compute_trace_preview(
     recordings: dict[str, object],
     electrode_table=None,

@@ -25,10 +25,12 @@ dependencies = [
     "zarr",
     "tqdm",
     "pydantic",
+    "dash>=2.18",
 ]
 
 [project.scripts]
 acute-slice-mea = "acute_slice_mea.cli:main"
+acute-slice-viewer = "acute_slice_mea.viewer.__main__:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

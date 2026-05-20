@@ -28,6 +28,8 @@ def save_cache_bundle(
     band_power: pd.DataFrame,
     spectrum: dict[str, np.ndarray],
     trace_preview: dict[str, np.ndarray],
+    bursts: list[dict] | None = None,
+    probe_geometry: dict | None = None,
 ) -> dict:
     """Save analysis outputs and return a manifest dictionary."""
     output_dir = Path(output_dir)
@@ -43,15 +45,25 @@ def save_cache_bundle(
     np.savez_compressed(spectrum_path, **spectrum)
     np.savez_compressed(trace_preview_path, **trace_preview)
 
+    files = {
+        "summary": str(summary_path),
+        "electrodes": str(electrodes_path),
+        "band_power": str(band_power_path),
+        "spectrum": str(spectrum_path),
+        "trace_preview": str(trace_preview_path),
+    }
+    if bursts is not None:
+        bursts_path = output_dir / "bursts.json"
+        bursts_path.write_text(json.dumps(bursts, separators=(",", ":")))
+        files["bursts"] = str(bursts_path)
+    if probe_geometry is not None:
+        probe_path = output_dir / "probe.json"
+        probe_path.write_text(json.dumps(probe_geometry, separators=(",", ":")))
+        files["probe"] = str(probe_path)
+
     manifest = {
         "summary": summary,
-        "files": {
-            "summary": str(summary_path),
-            "electrodes": str(electrodes_path),
-            "band_power": str(band_power_path),
-            "spectrum": str(spectrum_path),
-            "trace_preview": str(trace_preview_path),
-        },
+        "files": files,
     }
     manifest_path = output_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest, indent=2, default=str))

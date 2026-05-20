@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from time import perf_counter
 
+from acute_slice_mea.bursts import compute_bursts_from_recording
 from acute_slice_mea.cache import save_cache_bundle
 from acute_slice_mea.dashboard import export_dashboard_data
 from acute_slice_mea.electrodes import build_electrode_table
@@ -16,10 +17,12 @@ from acute_slice_mea.plots import (
     write_spectrum_summary_html,
     write_trace_preview_html,
 )
+from acute_slice_mea.probe_geometry import build_probe_geometry
 from acute_slice_mea.recording import load_maxwell_recording, prepare_recordings
 from acute_slice_mea.spectral import (
     DEFAULT_LFP_BANDS,
     compute_lfp_band_power_over_time,
+    compute_lfp_rms_per_electrode,
     compute_trace_preview,
     compute_welch_spectrum_summary,
 )
@@ -46,6 +49,11 @@ class AnalysisConfig:
     preview_electrode_ids: list[int] | None = field(default=None)
     dashboard_max_points_per_electrode: int = 20000
     export_dashboard_data: bool = True
+    compute_bursts: bool = True
+    burst_detection_max_sec: float = 120.0
+    export_probe_geometry: bool = True
+    compute_rms_per_electrode: bool = True
+    rms_window_sec: float = 10.0
     spikeinterface_chunk_duration: str = "60s"
     apply_lfp_common_reference: bool = True
     apply_spike_common_reference: bool = True
@@ -133,6 +141,33 @@ def run_analysis(config: AnalysisConfig) -> dict:
         max_points=config.preview_max_points,
     )
 
+    bursts: list[dict] | None = None
+    if config.compute_bursts:
+        _log_verbose(config, "Detecting network bursts")
+        bursts = compute_bursts_from_recording(
+            recordings["lfp"],
+            electrode_table=electrodes,
+            duration_sec=config.burst_detection_max_sec,
+        )
+
+    rms_by_electrode: dict[int, float] = {}
+    if config.compute_rms_per_electrode:
+        _log_verbose(config, "Computing per-electrode RMS")
+        rms_by_electrode = compute_lfp_rms_per_electrode(
+            recordings["lfp"],
+            electrode_table=electrodes,
+            duration_sec=config.rms_window_sec,
+        )
+    if rms_by_electrode:
+        electrodes = electrodes.assign(
+            rms_uv=electrodes["electrode_id"].astype(int).map(rms_by_electrode)
+        )
+
+    probe_geometry: dict | None = None
+    if config.export_probe_geometry:
+        _log_verbose(config, "Building probe geometry")
+        probe_geometry = build_probe_geometry(electrodes)
+
     elapsed_sec = perf_counter() - started
     summary = {
         **asdict(config),
@@ -144,6 +179,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         "elapsed_sec": elapsed_sec,
     }
     summary["preview_electrode_ids_resolved"] = preview_electrode_ids
+    summary["num_bursts"] = None if bursts is None else len(bursts)
     _log_verbose(config, "Saving cache bundle")
     manifest = save_cache_bundle(
         output_dir,
@@ -152,6 +188,8 @@ def run_analysis(config: AnalysisConfig) -> dict:
         band_power=band_power,
         spectrum=spectrum,
         trace_preview=trace_preview,
+        bursts=bursts,
+        probe_geometry=probe_geometry,
     )
     _log_verbose(config, "Writing figures")
     figure_paths = {

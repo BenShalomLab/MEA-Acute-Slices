@@ -79,6 +79,27 @@ jupyter lab
 
 Start new analyses by copying or editing `notebooks/00_mea_analysis_template.ipynb`.
 
+## Interactive Trace Viewer
+
+An interactive Dash dashboard for non-technical users to browse cached LFP recordings:
+
+```bash
+# 1. Build per-(recording, well) caches once. Resumable; skips cached bundles.
+python scripts/build_viewer_cache.py \
+    --data-root /Volumes/SadeghYR/Yuxin/MEA/raw/MeaSlices_CarenPaula_04082026 \
+    --cache-root data/processed
+
+# 2. Launch the viewer pointing at the same cache root.
+python -m acute_slice_mea.viewer --cache-root data/processed
+# Open http://localhost:8050
+```
+
+The viewer is a thin client over the cache; all heavy preprocessing
+(bandpass, burst detection, RMS, probe geometry) happens once in
+`scripts/build_viewer_cache.py` so other parts of the project can read the
+same JSON / parquet files. See `src/acute_slice_mea/{bursts,probe_geometry,library}.py`
+and `src/acute_slice_mea/viewer/` for details.
+
 ## HD-MEA LFP Exploratory Figures
 
 This repository also includes a reproducible, non-interactive LFP visualization pipeline in `hdmea_lfp_viz/`.

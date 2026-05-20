@@ -7,3 +7,4 @@ seaborn>=0.13,<1
 scikit-learn>=1.4,<2
 datashader>=0.16,<1
 tqdm>=4.66,<5
+dash>=2.18,<3
