@@ -44,6 +44,10 @@ def build_cache_for(
     compute_bursts: bool = True,
     export_probe_geometry: bool = True,
     export_dashboard_data: bool = True,
+    cache_lfp_to_disk: bool = True,
+    lfp_cache_dir: str | None = None,
+    keep_lfp_cache: bool = False,
+    lfp_target_fs_hz: float | None = 1000.0,
 ) -> Path:
     """Run ``run_analysis`` for one (recording, well); return the cache dir."""
     # recording.run already encodes /{rec_name} for multi-rec entries, so the
@@ -68,6 +72,10 @@ def build_cache_for(
         compute_bursts=compute_bursts,
         export_probe_geometry=export_probe_geometry,
         export_dashboard_data=export_dashboard_data,
+        cache_lfp_to_disk=cache_lfp_to_disk,
+        lfp_cache_dir=lfp_cache_dir,
+        keep_lfp_cache=keep_lfp_cache,
+        lfp_target_fs_hz=lfp_target_fs_hz,
     )
     started = perf_counter()
     run_analysis(config)
@@ -104,6 +112,34 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-bursts", action="store_true", help="Skip network-burst detection.")
     parser.add_argument("--no-probe-geometry", action="store_true", help="Skip probe geometry export.")
     parser.add_argument("--no-dashboard", action="store_true", help="Skip dashboard JSON export.")
+    parser.add_argument(
+        "--no-lfp-cache",
+        action="store_true",
+        help="Disable on-disk LFP materialization (legacy path: filter+CR re-applied per window).",
+    )
+    parser.add_argument(
+        "--keep-lfp-cache",
+        action="store_true",
+        help="Keep the .lfp_cache/ folder after the run (otherwise removed on completion).",
+    )
+    parser.add_argument(
+        "--lfp-cache-dir",
+        type=str,
+        default=None,
+        help="Override location of the on-disk LFP cache (default: <output_dir>/.lfp_cache).",
+    )
+    parser.add_argument(
+        "--lfp-target-fs-hz",
+        type=float,
+        default=1000.0,
+        help="Downsample the LFP path to this rate (Hz) before filtering. Default 1000. "
+             "Use --no-resample to keep the native rate.",
+    )
+    parser.add_argument(
+        "--no-resample",
+        action="store_true",
+        help="Disable the default 1 kHz LFP-path resample; run LFP analysis at the native sample rate.",
+    )
     args = parser.parse_args(argv)
 
     compute_spectrum = not (args.no_spectrum or args.minimal)
@@ -111,6 +147,7 @@ def main(argv: list[str] | None = None) -> int:
     compute_bursts = not (args.no_bursts or args.minimal)
     export_probe_geometry = not (args.no_probe_geometry or args.minimal)
     export_dashboard_data = not (args.no_dashboard or args.minimal)
+    lfp_target_fs_hz: float | None = None if args.no_resample else float(args.lfp_target_fs_hz)
 
     logging.basicConfig(level=logging.INFO, format="%(message)s", stream=sys.stderr)
 
@@ -144,6 +181,10 @@ def main(argv: list[str] | None = None) -> int:
                     compute_bursts=compute_bursts,
                     export_probe_geometry=export_probe_geometry,
                     export_dashboard_data=export_dashboard_data,
+                    cache_lfp_to_disk=not args.no_lfp_cache,
+                    lfp_cache_dir=args.lfp_cache_dir,
+                    keep_lfp_cache=args.keep_lfp_cache,
+                    lfp_target_fs_hz=lfp_target_fs_hz,
                 )
             except Exception:
                 total_failures += 1

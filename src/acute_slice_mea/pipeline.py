@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 from pathlib import Path
+import shutil
 import sys
 from time import perf_counter
 
@@ -18,7 +19,11 @@ from acute_slice_mea.plots import (
     write_trace_preview_html,
 )
 from acute_slice_mea.probe_geometry import build_probe_geometry
-from acute_slice_mea.recording import load_maxwell_recording, prepare_recordings
+from acute_slice_mea.recording import (
+    load_maxwell_recording,
+    materialize_lfp,
+    prepare_recordings,
+)
 from acute_slice_mea.spectral import (
     DEFAULT_LFP_BANDS,
     compute_lfp_band_power_over_time,
@@ -62,8 +67,15 @@ class AnalysisConfig:
     apply_spike_common_reference: bool = True
     lfp_filter_margin_ms: int = 10000
     lfp_ignore_low_freq_error: bool = True
+    lfp_target_fs_hz: float | None = 1000.0
+    lfp_target_fs_hz: float | None = 1000
     n_jobs: int = 1
     channel_chunk_size: int | None = None
+    cache_lfp_to_disk: bool = True
+    lfp_cache_dir: str | None = None
+    keep_lfp_cache: bool = False
+    lfp_save_n_jobs: int = 1
+    lfp_save_chunk_duration: str = "10s"
     progress: bool = True
     verbose: bool = False
 
@@ -98,13 +110,26 @@ def run_analysis(config: AnalysisConfig) -> dict:
         apply_spike_common_reference=config.apply_spike_common_reference,
         lfp_filter_margin_ms=config.lfp_filter_margin_ms,
         lfp_ignore_low_freq_error=config.lfp_ignore_low_freq_error,
+        lfp_target_fs_hz=config.lfp_target_fs_hz,
     )
-    metadata_recording = recordings["raw"]
+    metadata_recording = recordings["lfp"]
     fs = float(metadata_recording.get_sampling_frequency())
     num_samples = int(metadata_recording.get_num_samples())
     _log_verbose(config, "Building electrode table")
     electrodes = build_electrode_table(metadata_recording.get_probe(), metadata_recording)
     recorded = electrodes[electrodes["recorded"].astype(bool)]
+
+    lfp_cache_dir: Path | None = None
+    if config.cache_lfp_to_disk:
+        lfp_cache_dir = Path(config.lfp_cache_dir or (output_dir / ".lfp_cache"))
+        _log_verbose(config, f"Materializing LFP to {lfp_cache_dir}")
+        recordings["lfp"] = materialize_lfp(
+            recordings["lfp"],
+            lfp_cache_dir,
+            save_n_jobs=config.lfp_save_n_jobs,
+            save_chunk_duration=config.lfp_save_chunk_duration,
+            progress=config.progress,
+        )
 
     _log_verbose(config, "Computing LFP band power")
     band_power = compute_lfp_band_power_over_time(
@@ -227,4 +252,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         )
     _log_verbose(config, "Writing manifest")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
+    if lfp_cache_dir is not None and not config.keep_lfp_cache:
+        _log_verbose(config, f"Removing LFP cache {lfp_cache_dir}")
+        shutil.rmtree(lfp_cache_dir, ignore_errors=True)
     return manifest

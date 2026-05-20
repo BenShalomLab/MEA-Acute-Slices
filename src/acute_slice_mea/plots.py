@@ -74,12 +74,13 @@ def write_trace_preview_html(trace_preview: dict[str, np.ndarray], output_path, 
         subplot_titles=[name.upper() for name in signal_names],
         vertical_spacing=0.08,
     )
-    time_sec = trace_preview["time_sec"]
+    fallback_time = trace_preview.get("time_sec")
     electrode_ids = trace_preview.get("electrode_ids", np.arange(trace_preview[signal_names[0]].shape[1]))
     channel_ids = trace_preview.get("channel_ids", electrode_ids)
 
     for row, name in enumerate(signal_names, start=1):
         traces = trace_preview[name]
+        time_sec = trace_preview.get(f"time_sec_{name}", fallback_time)
         scale = np.nanpercentile(np.abs(traces), 95)
         if not np.isfinite(scale) or scale == 0:
             scale = 1.0

@@ -299,26 +299,34 @@ def compute_trace_preview(
     max_points=20000,
     return_scaled=True,
 ) -> dict[str, np.ndarray]:
-    """Return decimated traces for quick raw/LFP/spike visualization."""
+    """Return decimated traces for quick raw/LFP/spike visualization.
+
+    Each recording may have its own sampling rate (e.g. LFP resampled to
+    1 kHz while raw/spike stay at the acquisition rate), so frame ranges
+    and time grids are computed per-recording.
+    """
     if not recordings:
         raise ValueError("At least one recording is required.")
     first = next(iter(recordings.values()))
-    fs = float(first.get_sampling_frequency())
     electrode_ids_resolved, channel_ids = _resolve_channels(first, electrode_table, electrode_ids)
-    start_frame = max(0, int(round(float(start_sec) * fs)))
-    end_frame = min(first.get_num_samples(), start_frame + int(round(float(duration_sec) * fs)))
-    if end_frame <= start_frame:
-        raise ValueError("Requested trace preview window is empty.")
-
-    step = max(1, int(np.ceil((end_frame - start_frame) / int(max_points))))
-    frames = np.arange(start_frame, end_frame, step)
-    preview = {
-        "time_sec": frames / fs,
+    preview: dict[str, np.ndarray] = {
         "electrode_ids": np.asarray(electrode_ids_resolved),
         "channel_ids": np.asarray(channel_ids, dtype=object),
-        "sample_step": np.asarray(step),
     }
+    any_nonempty = False
     for name, recording in recordings.items():
+        fs = float(recording.get_sampling_frequency())
+        start_frame = max(0, int(round(float(start_sec) * fs)))
+        end_frame = min(recording.get_num_samples(), start_frame + int(round(float(duration_sec) * fs)))
+        if end_frame <= start_frame:
+            continue
+        any_nonempty = True
+        step = max(1, int(np.ceil((end_frame - start_frame) / int(max_points))))
+        frames = np.arange(start_frame, end_frame, step)
         traces = get_traces_safe(recording, start_frame, end_frame, channel_ids, return_scaled=return_scaled)
         preview[name] = traces[::step]
+        preview[f"time_sec_{name}"] = frames / fs
+        preview[f"sample_step_{name}"] = np.asarray(step)
+    if not any_nonempty:
+        raise ValueError("Requested trace preview window is empty.")
     return preview

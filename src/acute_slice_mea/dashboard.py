@@ -76,16 +76,16 @@ def export_dashboard_data(
     if not signals:
         raise ValueError("No requested dashboard signals are available in recordings.")
 
-    first_recording = recordings[signals[0]]
-    fs = float(first_recording.get_sampling_frequency())
-    num_samples = int(first_recording.get_num_samples())
-    step = max(1, int(np.ceil(num_samples / int(max_points_per_electrode))))
-    sample_frames = np.arange(0, num_samples, step)
-    time_sec = sample_frames / fs
-
     trace_index: dict[str, dict[str, str]] = {signal: {} for signal in signals}
+    signal_steps: dict[str, int] = {}
     for signal in signals:
         recording = recordings[signal]
+        fs = float(recording.get_sampling_frequency())
+        num_samples = int(recording.get_num_samples())
+        step = max(1, int(np.ceil(num_samples / int(max_points_per_electrode))))
+        sample_frames = np.arange(0, num_samples, step)
+        time_sec = sample_frames / fs
+        signal_steps[signal] = int(step)
         signal_dir = traces_dir / signal
         for row in recorded.itertuples(index=False):
             traces = get_traces_safe(recording, 0, num_samples, [row.channel_id])
@@ -118,7 +118,7 @@ def export_dashboard_data(
         "signal_labels": {signal: SIGNAL_LABELS.get(signal, signal) for signal in signals},
         "bands": DEFAULT_LFP_BANDS,
         "max_points_per_electrode": int(max_points_per_electrode),
-        "sample_step": int(step),
+        "sample_step": signal_steps,
         "electrodes": electrodes_payload,
         "files": {
             "electrodes": "data/electrodes.json",
