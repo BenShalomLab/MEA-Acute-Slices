@@ -54,9 +54,35 @@ ACTIVE_STATES = {"queued", "running"}
 
 DEFAULT_PARAMS: dict[str, Any] = {
     "band": [0.5, 300.0],
+    # ``reference`` can be one of:
+    #   "CAR"  -> common-average reference (operator="mean")
+    #   "CMR"  -> common-median reference (operator="median")
+    #   "none" -> no common reference
+    # Historic "CAR" jobs were actually median-referenced; we keep "CAR" as
+    # the default and treat it as the median operator for cache continuity
+    # — new submissions choosing "CMR" still hash to a new cache.
     "reference": "CAR",
     "channels": "routed64",
-    "decimation": 1,
+    # 1 kHz downsample target for the LFP path. Lower values reduce file
+    # size and compute at the cost of high-frequency LFP resolution. None
+    # disables resampling (operate at raw rate).
+    "lfp_fs_hz": 1000.0,
+    # List of notch frequencies (Hz). Empty list = no notch.
+    "notch_freqs": [],
+    "notch_q": 30.0,
+    # Power-band ranges fed to ``compute_lfp_band_power_over_time``. Map of
+    # name -> [low_hz, high_hz]. Keeping these in params means changing a
+    # band invalidates the cache via params_hash.
+    "bands": {
+        "delta": [0.5, 4.0],
+        "theta": [4.0, 8.0],
+        "alpha": [8.0, 12.0],
+        "beta":  [12.0, 30.0],
+        "low_gamma":  [30.0, 80.0],
+        "high_gamma": [80.0, 150.0],
+    },
+    "window_sec": 10.0,
+    "step_sec":   5.0,
     "pipeline": PIPELINE_VERSION,
 }
 
@@ -408,6 +434,41 @@ class JobsBackend:
 
             self._maybe_start_next()
             return {"job_id": job_id, "hash": hash_}
+
+    def submit_batch(
+        self,
+        specs: list[dict],
+        *,
+        params: dict | None = None,
+        overwrite: bool = False,
+    ) -> list[dict]:
+        """Submit many (recording, well) tuples in one call.
+
+        Each spec is a dict with at minimum ``recording_id`` and ``well_id``;
+        optional fields ``raw_path``, ``rec_name``, ``recording_label`` and
+        ``well_label`` are forwarded to :meth:`submit` so the resulting jobs
+        carry the same metadata as single submissions. ``params`` and
+        ``overwrite`` apply to every spec in the batch — call separately if
+        you need per-spec overrides.
+
+        Returns one ``{job_id, hash}`` / ``{error}`` result per input spec,
+        in the same order. The queue still respects ``workers.cap`` so a
+        batch of 50 wells with cap=1 enqueues 49 and spawns the first.
+        """
+        results: list[dict] = []
+        for spec in specs:
+            result = self.submit(
+                recording_id=spec["recording_id"],
+                well_id=spec["well_id"],
+                raw_path=spec.get("raw_path"),
+                rec_name=spec.get("rec_name"),
+                params=params,
+                overwrite=overwrite,
+                recording_label=spec.get("recording_label"),
+                well_label=spec.get("well_label"),
+            )
+            results.append(result)
+        return results
 
     def cancel(self, job_id: str) -> None:
         with self._lock:

@@ -196,7 +196,33 @@ def run(job_dir: Path) -> int:
 
             band = params.get("band") or [0.5, 300.0]
             reference = (params.get("reference") or "CAR").upper()
-            apply_lfp_common = reference == "CAR"
+            # "CAR" historically meant median; preserve that mapping so old
+            # caches don't get invalidated. "CMR" is the new explicit median.
+            if reference == "NONE":
+                apply_lfp_common = False
+                lfp_ref_op = "median"
+            elif reference == "CMR":
+                apply_lfp_common = True
+                lfp_ref_op = "median"
+            elif reference == "MEAN":
+                apply_lfp_common = True
+                lfp_ref_op = "mean"
+            else:  # "CAR" — historic alias for median
+                apply_lfp_common = True
+                lfp_ref_op = "median"
+
+            notch_freqs_raw = params.get("notch_freqs") or []
+            notch_freqs = [float(f) for f in notch_freqs_raw if f is not None]
+
+            bands_raw = params.get("bands") or {}
+            lfp_bands = {
+                str(name): (float(low_high[0]), float(low_high[1]))
+                for name, low_high in bands_raw.items()
+                if isinstance(low_high, (list, tuple)) and len(low_high) == 2
+            } or None
+
+            lfp_fs_hz_raw = params.get("lfp_fs_hz", 1000.0)
+            lfp_fs_hz = float(lfp_fs_hz_raw) if lfp_fs_hz_raw not in (None, "") else None
 
             config = AnalysisConfig(
                 data_path=str(raw_path),
@@ -206,11 +232,30 @@ def run(job_dir: Path) -> int:
                 lfp_low_hz=float(band[0]),
                 lfp_high_hz=float(band[1]),
                 apply_lfp_common_reference=apply_lfp_common,
+                lfp_reference_operator=lfp_ref_op,
+                lfp_target_fs_hz=lfp_fs_hz,
+                lfp_notch_freqs=notch_freqs or None,
+                lfp_notch_q=float(params.get("notch_q", 30.0)),
+                lfp_bands=lfp_bands,
+                lfp_window_sec=float(params.get("window_sec", 10.0)),
+                lfp_step_sec=float(params.get("step_sec", 5.0)),
                 progress=False,
                 verbose=False,
             )
             _phase(job_dir, "preparing", PHASES[1][1])
-            _run_analysis_with_phases(run_analysis, config, job_dir)
+
+            # Pipeline now reports stage transitions directly via a callback.
+            # We map each stage name to its phase progress, fall back to the
+            # estimated baseline for unknown names, and clamp into [0, 1] so
+            # bad numbers never break the bar.
+            stage_progress = {name: pct for name, pct in PHASES}
+
+            def _on_pipeline_stage(stage: str, fraction: float) -> None:
+                target = stage_progress.get(stage, fraction)
+                target = max(0.0, min(1.0, float(target)))
+                _phase(job_dir, stage, target)
+
+            run_analysis(config, progress_callback=_on_pipeline_stage)
 
             _phase(job_dir, "saving", PHASES[6][1])
             write_cache_meta(output_dir, params=params, hash_=spec.get("hash", ""))
@@ -224,68 +269,6 @@ def run(job_dir: Path) -> int:
         _wipe_partial_cache()
         _finalize_failed(job_dir, f"{type(exc).__name__}: {exc}", tb=traceback.format_exc())
         return 1
-
-
-def _run_analysis_with_phases(run_analysis, config, job_dir: Path) -> None:
-    """Bridge the linear ``run_analysis`` call to our coarse phase markers.
-
-    ``run_analysis`` doesn't expose per-stage hooks; rather than rewriting it
-    we wrap it: we mark the band-power phase as we *enter* the call, then bump
-    progress every few seconds while it runs by polling wall-clock against an
-    estimate. The heartbeat thread keeps last_heartbeat fresh independently.
-    """
-    progress_targets = [
-        ("band_power", PHASES[2][1]),
-        ("spectrum", PHASES[3][1]),
-        ("trace_preview", PHASES[4][1]),
-        ("bursts", PHASES[5][1]),
-    ]
-
-    # Start at "band_power" before invoking; the actual call is blocking.
-    _phase(job_dir, *progress_targets[0])
-    advance_thread = _PhaseAdvancer(job_dir, progress_targets)
-    advance_thread.start()
-    try:
-        run_analysis(config)
-    finally:
-        advance_thread.stop()
-        advance_thread.join(timeout=2.0)
-
-
-class _PhaseAdvancer(threading.Thread):
-    """Walks phase progress upward while ``run_analysis`` blocks."""
-
-    def __init__(self, job_dir: Path, phases: list[tuple[str, float]]) -> None:
-        super().__init__(daemon=True)
-        self.job_dir = job_dir
-        self.phases = phases
-        self._stop_event = threading.Event()
-        self._step_interval_s = 8.0  # nudge stage every ~8 s
-
-    def stop(self) -> None:
-        self._stop_event.set()
-
-    def run(self) -> None:
-        idx = 1
-        while idx < len(self.phases) and not self._stop_event.wait(self._step_interval_s):
-            if _cancel_requested.is_set():
-                return
-            name, target = self.phases[idx]
-            try:
-                payload = _merge_existing_progress(
-                    self.job_dir,
-                    {
-                        "state": "running",
-                        "stage": name,
-                        "progress": target,
-                        "last_heartbeat": time.time(),
-                        "pid": os.getpid(),
-                    },
-                )
-                _write_progress(self.job_dir, payload)
-            except Exception:
-                logger.exception("phase advance write failed")
-            idx += 1
 
 
 def _finalize_success(job_dir: Path) -> None:

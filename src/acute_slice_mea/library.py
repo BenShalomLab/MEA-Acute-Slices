@@ -25,7 +25,9 @@ import json
 import logging
 from pathlib import Path
 import re
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
+
+from acute_slice_mea.maxwell_metadata import extract_recording_metadata
 
 logger = logging.getLogger(__name__)
 
@@ -45,6 +47,10 @@ class WellEntry:
     num_recorded_electrodes: int | None = None
     has_dashboard_data: bool = False
     group: str | None = None      # treatment / genotype label, if known
+    # Populated from a sibling ``mxassay.metadata`` file when present.
+    control: bool | None = None
+    well_name: str | None = None  # plate notation A1..D6
+    annotations: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -63,6 +69,14 @@ class RecordingEntry:
     raw_path: str | None = None
     cache_root: str | None = None
     wells: list[WellEntry] = field(default_factory=list)
+    # Populated from a sibling ``mxassay.metadata`` file when present.
+    chipid: str | None = None
+    project_title: str | None = None
+    tag: str | None = None
+    started_iso_utc: str | None = None
+    finished_iso_utc: str | None = None
+    rating: int | None = None
+    runtime_sec: int | None = None
 
     @property
     def iso_date(self) -> str:
@@ -187,6 +201,10 @@ class LibraryIndex:
             wells_recs = _list_wells_and_recs_from_h5(raw_path)
             if not wells_recs:
                 continue
+            # Decode sibling mxassay.metadata once per run dir; cheap, and
+            # the same file applies to every (rec_name, well_id) below.
+            mxmeta = extract_recording_metadata(run_dir.path) or {}
+            well_meta_by_id = mxmeta.get("wells") or {}
             # Group (well_id, rec_name) pairs by rec_name. Single-rec files
             # collapse to one RecordingEntry with rec_name=None (legacy layout).
             # Multi-rec files expand to one RecordingEntry per rec_name with
@@ -202,6 +220,20 @@ class LibraryIndex:
                 else:
                     actual_run = f"{run_dir.run}/{rec_name}"
                     recording_id = f"{run_dir.recording_id}/{rec_name}"
+                wells = []
+                for w in sorted(well_ids):
+                    wmeta = well_meta_by_id.get(w) or {}
+                    wells.append(
+                        WellEntry(
+                            well_id=w,
+                            rec_name=rec_name,
+                            raw_path=str(raw_path),
+                            group=wmeta.get("groupname"),
+                            control=wmeta.get("control"),
+                            well_name=wmeta.get("well_name"),
+                            annotations=wmeta.get("annotations") or {},
+                        )
+                    )
                 records.append(
                     RecordingEntry(
                         recording_id=recording_id,
@@ -211,10 +243,15 @@ class LibraryIndex:
                         scan=run_dir.scan,
                         run=actual_run,
                         raw_path=str(raw_path),
-                        wells=[
-                            WellEntry(well_id=w, rec_name=rec_name, raw_path=str(raw_path))
-                            for w in sorted(well_ids)
-                        ],
+                        wells=wells,
+                        chipid=mxmeta.get("chipid"),
+                        project_title=mxmeta.get("project_title"),
+                        tag=mxmeta.get("tag"),
+                        operator=mxmeta.get("operator"),
+                        started_iso_utc=mxmeta.get("started_iso_utc"),
+                        finished_iso_utc=mxmeta.get("finished_iso_utc"),
+                        rating=mxmeta.get("rating") if isinstance(mxmeta.get("rating"), int) else None,
+                        runtime_sec=mxmeta.get("runtime_sec"),
                     )
                 )
         return cls(records, mode="raw", root=str(root))
@@ -425,23 +462,49 @@ def _list_wells_and_recs_from_h5(raw_path: Path) -> list[tuple[str, str | None]]
         return []
     try:
         with h5py.File(raw_path, "r") as h5:
-            wells = h5.get("wells")
-            if wells is None:
-                return []
-            pairs: list[tuple[str, str]] = []
-            all_rec_names: set[str] = set()
-            for well_id in sorted(wells.keys()):
-                rec_group = wells[well_id]
-                rec_names = sorted(rec_group.keys()) if hasattr(rec_group, "keys") else []
-                if not rec_names:
-                    continue
-                for rec_name in rec_names:
-                    pairs.append((well_id, rec_name))
-                    all_rec_names.add(rec_name)
+            pairs, all_rec_names = _read_h5_well_rec_pairs(h5)
     except (OSError, KeyError):
         logger.warning("failed to read wells from %s", raw_path, exc_info=True)
+        return []
+    if not pairs:
         return []
     if len(all_rec_names) <= 1:
         # Single rec_name across the whole file → preserve legacy layout.
         return [(well_id, None) for well_id, _ in pairs]
     return [(well_id, rec_name) for well_id, rec_name in pairs]
+
+
+def _read_h5_well_rec_pairs(h5) -> tuple[list[tuple[str, str]], set[str]]:
+    """Read (well_id, rec_name) pairs from either of the two known layouts.
+
+    MaxWell SDK has used two HDF5 layouts in the wild:
+      ``/wells/{well_id}/{rec_name}`` — older Acute-Slice/Network files.
+      ``/recordings/{rec_name}/{well_id}`` — newer plate-scan files (the
+        layout that the Yuxin_MEA DatasetManager assumes).
+    We try ``/wells`` first (current default) and fall back to ``/recordings``
+    so the dashboard can read both without the user knowing which version
+    produced the file.
+    """
+    pairs: list[tuple[str, str]] = []
+    all_rec_names: set[str] = set()
+
+    wells = h5.get("wells")
+    if wells is not None:
+        for well_id in sorted(wells.keys()):
+            rec_group = wells[well_id]
+            rec_names = sorted(rec_group.keys()) if hasattr(rec_group, "keys") else []
+            for rec_name in rec_names:
+                pairs.append((well_id, rec_name))
+                all_rec_names.add(rec_name)
+        if pairs:
+            return pairs, all_rec_names
+
+    recordings = h5.get("recordings")
+    if recordings is not None:
+        for rec_name in sorted(recordings.keys()):
+            rec_group = recordings[rec_name]
+            well_ids = sorted(rec_group.keys()) if hasattr(rec_group, "keys") else []
+            for well_id in well_ids:
+                pairs.append((well_id, rec_name))
+                all_rec_names.add(rec_name)
+    return pairs, all_rec_names

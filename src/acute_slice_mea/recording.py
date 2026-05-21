@@ -25,12 +25,22 @@ def prepare_recordings(
     lfp_filter_margin_ms=10000,
     lfp_ignore_low_freq_error=True,
     lfp_target_fs_hz: float | None = 1000,
+    lfp_notch_freqs: list[float] | None = None,
+    lfp_notch_q: float = 30.0,
+    lfp_reference_operator: str = "median",
+    spike_reference_operator: str = "median",
 ):
     """Prepare signed raw, LFP-filtered, and spike-filtered recording views.
 
     The LFP path is resampled to ``lfp_target_fs_hz`` before bandpass/CMR so
     that every downstream operation runs on the decimated signal. Spike path
     stays at the raw rate (needs >6 kHz Nyquist for 300–3000 Hz content).
+
+    Notch filters (when given) are applied to the LFP path immediately after
+    the bandpass, so power-line frequencies (50/60 Hz) and their harmonics
+    can be suppressed before any band-power analysis. ``lfp_reference_operator``
+    selects ``"mean"`` (true CAR) or ``"median"`` (CMR) for the common
+    reference; the median is more robust to single-channel outliers.
     """
     import spikeinterface.preprocessing as spre
 
@@ -52,11 +62,18 @@ def prepare_recordings(
         margin_ms=lfp_filter_margin_ms,
         ignore_low_freq_error=lfp_ignore_low_freq_error,
     )
+    # Notch each requested line frequency. We chain narrowband notches rather
+    # than computing a multi-frequency filter so the user can pick arbitrary
+    # frequencies (50, 60, 100, 120 …) and the filter stays well-conditioned.
+    for f in (lfp_notch_freqs or []):
+        if f is None:
+            continue
+        lfp = spre.notch_filter(lfp, freq=float(f), q=float(lfp_notch_q))
     spike = spre.bandpass_filter(signed, freq_min=spike_low_hz, freq_max=spike_high_hz)
     if apply_lfp_common_reference:
-        lfp = spre.common_reference(lfp, reference="global", operator="median")
+        lfp = spre.common_reference(lfp, reference="global", operator=lfp_reference_operator)
     if apply_spike_common_reference:
-        spike = spre.common_reference(spike, reference="global", operator="median")
+        spike = spre.common_reference(spike, reference="global", operator=spike_reference_operator)
     return {"raw": signed, "lfp": lfp, "spike": spike}
 
 

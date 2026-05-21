@@ -15,6 +15,8 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Input, Output, State, callback_context, ctx, html, no_update
 from dash.exceptions import PreventUpdate
+from plotly_resampler import FigureResampler
+from plotly_resampler.aggregation import MinMaxLTTB
 
 from acute_slice_mea.jobs import (
     DEFAULT_PARAMS,
@@ -35,6 +37,18 @@ from acute_slice_mea.viewer.layout import PLATE_COLS, PLATE_ROWS
 DEFAULT_SELECTION_SIZE = 6
 TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
+
+# Module-level resampler bound to the traces graph. plotly-resampler intercepts
+# Plotly relayoutData events on the graph and re-aggregates trace data from the
+# high-frequency reference (hf_x, hf_y) we pass in when adding traces. The
+# instance must outlive each figure-build callback, so it is kept here and
+# `replace()`d in place on every rebuild. MinMaxLTTB preserves peaks better
+# than plain LTTB for biophysical signals.
+TRACES_RESAMPLER: FigureResampler = FigureResampler(
+    default_n_shown_samples=2000,
+    default_downsampler=MinMaxLTTB(),
+    verbose=False,
+)
 
 
 @lru_cache(maxsize=32)
@@ -77,6 +91,49 @@ def register_all(
     params sheet, jobs drawer, workers slider) is wired up; otherwise the
     dashboard runs in view-only mode against pre-built caches.
     """
+
+    # Bind the resampler's relayout listener to the traces graph. This must
+    # happen once per app and is idempotent if re-registered with the same id.
+    TRACES_RESAMPLER.register_update_graph_callback(app=app, graph_id="traces-graph")
+
+    # -- library filter (runs in both view-only and jobs-enabled modes) ---
+    # In view-only mode, the cache-state dropdown is disabled in the UI, but
+    # the callback still runs on the other axes (sample, scan, plate, group).
+    @app.callback(
+        Output({"type": "lib-row", "recording_id": ALL, "well_id": ALL,
+                "sample": ALL, "scan": ALL, "plate": ALL, "group": ALL}, "className"),
+        Input("lib-filter-sample", "value"),
+        Input("lib-filter-scan", "value"),
+        Input("lib-filter-plate", "value"),
+        Input("lib-filter-group", "value"),
+        Input("lib-filter-cache", "value"),
+        Input("jobs-poll", "n_intervals"),
+        State({"type": "lib-row", "recording_id": ALL, "well_id": ALL,
+               "sample": ALL, "scan": ALL, "plate": ALL, "group": ALL}, "id"),
+    )
+    def filter_library(samples, scans, plates, groups, cache_states, _tick, ids):
+        sample_set = set(samples or [])
+        scan_set = set(scans or [])
+        plate_set = set(plates or [])
+        group_set = set(groups or [])
+        cache_set = set(cache_states or [])
+        out = []
+        for ident in ids or []:
+            visible = True
+            if sample_set and ident["sample"] not in sample_set:
+                visible = False
+            elif scan_set and ident["scan"] not in scan_set:
+                visible = False
+            elif plate_set and ident["plate"] not in plate_set:
+                visible = False
+            elif group_set and (ident["group"] or "") not in group_set:
+                visible = False
+            elif cache_set and jobs_backend is not None:
+                status = jobs_backend.get_status_for(ident["recording_id"], ident["well_id"])
+                if status not in cache_set:
+                    visible = False
+            out.append("lib-row-wrap" if visible else "lib-row-wrap hidden")
+        return out
 
     # -- helpers ------------------------------------------------------
 
@@ -283,6 +340,35 @@ def register_all(
             chosen.append(int(eid))
         return sorted(set(chosen))
 
+    @app.callback(
+        Output("selected-channels", "data", allow_duplicate=True),
+        Input("probe-map", "clickData"),
+        State("selected-channels", "data"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        prevent_initial_call=True,
+    )
+    def on_probe_click(click_data, current, recording_id, well_id):
+        # Single-click toggles one electrode in/out of the selection. This is
+        # the reliable fallback if lasso/box drag misbehaves on a given
+        # browser, and it also lets users fine-tune a lassoed set without
+        # restarting the selection.
+        if not click_data or "points" not in click_data or not click_data["points"]:
+            raise PreventUpdate
+        wd = _well_data(recording_id, well_id)
+        if wd is None:
+            raise PreventUpdate
+        eid = click_data["points"][0].get("customdata")
+        if eid is None:
+            raise PreventUpdate
+        eid = int(eid)
+        current = set(int(c) for c in (current or []))
+        if eid in current:
+            current.discard(eid)
+        else:
+            current.add(eid)
+        return sorted(current)
+
     # -- quick-select chips ------------------------------------------
 
     @app.callback(
@@ -372,7 +458,10 @@ def register_all(
     # -- traces figure ------------------------------------------------
 
     @app.callback(
-        Output("traces-graph", "figure"),
+        # `allow_duplicate=True` on traces-graph.figure is required because
+        # plotly-resampler's own callback (registered above) also writes to
+        # this output on user zoom/pan via the relayoutData input.
+        Output("traces-graph", "figure", allow_duplicate=True),
         Output("scrubber-graph", "figure"),
         Output("status-text", "children"),
         Output("trace-count-readout", "children"),
@@ -385,6 +474,7 @@ def register_all(
         Input("gain", "data"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
+        prevent_initial_call="initial_duplicate",
     )
     def render_traces(_version, selected_channels, window, gain, recording_id, well_id):
         wd = _well_data(recording_id, well_id)
@@ -529,13 +619,17 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         rms = entry.get("rms_uv")
         intensity = 0.0 if rms is None or rms_max == 0 else min(1.0, float(rms) / rms_max)
         colors.append(_interp_color(intensity))
-        # Pixel sizing. At chip-fit zoom the 17.5 μm pitch is ~3 px wide, so
-        # markers must stay tiny or they drown the grid. Selected state below
-        # bumps to 6 px with an outline so the highlight reads at any zoom.
-        sizes.append(2 + 2 * intensity)
+        # Lasso needs markers big enough for Plotly's hit-test to find them
+        # under the drawn path. 5–8 px is the working range; smaller markers
+        # made box/lasso silently fail in WebGL.
+        sizes.append(5 + 3 * intensity)
 
+    # SVG Scatter (not Scattergl) — at ~hundreds of routed electrodes the
+    # SVG cost is fine, and SVG hit-testing for lasso/box select is reliable
+    # across Plotly versions and browsers. Scattergl's selection was the
+    # primary cause of the broken probe-map picker.
     fig.add_trace(
-        go.Scattergl(
+        go.Scatter(
             x=xs, y=ys,
             customdata=custom,
             mode="markers",
@@ -547,18 +641,20 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             ),
             hovertemplate="E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>",
             selectedpoints=[i for i, eid in enumerate(custom) if eid in selected_set] or None,
-            # scattergl.selected.Marker only supports color/opacity/size — no
-            # line/outline. Use color + a modest size bump for the highlight.
-            selected=dict(marker=dict(color=TRACE_COLOR, size=6)),
+            selected=dict(marker=dict(color=TRACE_COLOR, size=8, opacity=1.0)),
             unselected=dict(marker=dict(opacity=0.55)),
         )
     )
 
-    fig.update_layout(_probe_map_layout())
+    # uirevision keyed by (recording, well) keeps Plotly's drag-mode and
+    # in-progress lasso strokes alive across the figure rebuilds triggered by
+    # `selected-channels` updates.
+    revision = f"{wd.cache_dir}" if wd is not None else "empty"
+    fig.update_layout(_probe_map_layout(uirevision=revision))
     return fig
 
 
-def _probe_map_layout(*, empty: bool = False) -> dict:
+def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict:
     return dict(
         margin=dict(l=8, r=8, t=8, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
@@ -581,6 +677,7 @@ def _probe_map_layout(*, empty: bool = False) -> dict:
         ),
         showlegend=False,
         dragmode="lasso",
+        uirevision=uirevision,
         annotations=[]
         if not empty
         else [
@@ -599,9 +696,13 @@ def _build_traces_figure(
     window: list[float],
     gain: float,
 ) -> go.Figure:
-    fig = go.Figure()
+    # Always reset the module-level resampler so old traces don't leak between
+    # rebuilds. `replace()` swaps in a fresh underlying Figure while preserving
+    # the resampler's bound Dash callback.
+    TRACES_RESAMPLER.replace(go.Figure())
+
     if wd is None or not selected_channels:
-        fig.update_layout(
+        TRACES_RESAMPLER.update_layout(
             margin=dict(l=20, r=20, t=10, b=30),
             paper_bgcolor="rgba(0,0,0,0)",
             plot_bgcolor="#faf9f5",
@@ -618,12 +719,15 @@ def _build_traces_figure(
                 )
             ],
         )
-        return fig
+        return TRACES_RESAMPLER
 
     t0, t1 = float(window[0]), float(window[1])
-    payloads = wd.traces_for(selected_channels, signal="lfp", t0=t0, t1=t1)
+    # Pass the full cached trace into the resampler (no slicing by t0/t1) so
+    # that zooming out past the initial window still has data; the resampler
+    # uses the visible x-range to decide point density.
+    payloads = wd.traces_for(selected_channels, signal="lfp", t0=None, t1=None)
     if not payloads:
-        fig.update_layout(
+        TRACES_RESAMPLER.update_layout(
             annotations=[
                 dict(
                     text="Selected electrodes have no cached LFP traces",
@@ -632,29 +736,35 @@ def _build_traces_figure(
                 )
             ],
         )
-        return fig
+        return TRACES_RESAMPLER
 
     # Stack traces vertically with constant vertical offset.
     spacing = 250.0 / max(gain, 0.1)  # microvolts between rows
     for idx, payload in enumerate(payloads):
         offset = -idx * spacing
-        fig.add_trace(
+        hf_x = np.asarray(payload["time_sec"], dtype=np.float64)
+        hf_y = np.asarray(payload["value"], dtype=np.float64) * gain + offset
+        # add_trace(...) with hf_x/hf_y registers the full-resolution data as
+        # the resampling source. The trace's own x/y are filled in by the
+        # aggregator (defaults to MinMaxLTTB → ~2000 points for the visible
+        # range). When the user zooms, the resampler's relayout callback
+        # re-aggregates from hf_x/hf_y.
+        TRACES_RESAMPLER.add_trace(
             go.Scattergl(
-                x=payload["time_sec"],
-                y=payload["value"] * gain + offset,
                 mode="lines",
                 line=dict(color=TRACE_COLOR, width=1),
                 name=f"E{payload['electrode_id']}",
-                hovertemplate="t=%{x:.3f}s<br>%{text}<extra></extra>",
-                text=[f"E{payload['electrode_id']}"] * len(payload["time_sec"]),
-            )
+                hovertemplate="t=%{x:.3f}s<extra></extra>",
+            ),
+            hf_x=hf_x,
+            hf_y=hf_y,
         )
 
-    # Burst shading
+    # Burst shading. Drawn as shapes (not traces) so they are not resampled.
+    # We render every burst in the recording; Plotly clips shapes outside the
+    # visible x-range automatically, so panning/zooming stays cheap.
     for burst in wd.bursts:
-        if burst["t_end_s"] < t0 or burst["t_start_s"] > t1:
-            continue
-        fig.add_vrect(
+        TRACES_RESAMPLER.add_vrect(
             x0=burst["t_start_s"], x1=burst["t_end_s"],
             fillcolor=BURST_COLOR, line_width=0, layer="below",
         )
@@ -662,7 +772,7 @@ def _build_traces_figure(
     y_min = -(len(payloads) - 0.5) * spacing
     y_max = 0.5 * spacing
     label_positions = [-i * spacing for i in range(len(payloads))]
-    fig.update_layout(
+    TRACES_RESAMPLER.update_layout(
         margin=dict(l=70, r=24, t=12, b=40),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#faf9f5",
@@ -684,8 +794,12 @@ def _build_traces_figure(
             tickfont=dict(family="IBM Plex Mono", size=10, color="#1a1916"),
         ),
         hovermode="closest",
+        # Keying uirevision off the well preserves the user's interactive
+        # zoom state across selection/gain changes within a well, but cleanly
+        # resets when they switch wells.
+        uirevision=f"{wd.cache_dir}",
     )
-    return fig
+    return TRACES_RESAMPLER
 
 
 def _build_scrubber_figure(wd: WellData | None, window: list[float]) -> go.Figure:
@@ -1038,24 +1152,110 @@ def _register_jobs_callbacks(app, library, backend, load_well_data):
         State("params-band-low", "value"),
         State("params-band-high", "value"),
         State("params-reference", "value"),
-        State("params-decimation", "value"),
+        State("params-lfp-fs", "value"),
+        State("params-notch", "value"),
+        State("params-notch-q", "value"),
+        State("params-window-sec", "value"),
+        State("params-step-sec", "value"),
+        State({"type": "param-band", "name": ALL, "edge": ALL}, "value"),
+        State({"type": "param-band", "name": ALL, "edge": ALL}, "id"),
         State("params-overwrite", "value"),
         prevent_initial_call=True,
     )
-    def submit_params(_clicks, state, low, high, reference, decimation, overwrite):
+    def submit_params(
+        _clicks,
+        state,
+        low,
+        high,
+        reference,
+        lfp_fs,
+        notch_text,
+        notch_q,
+        window_sec,
+        step_sec,
+        band_values,
+        band_ids,
+        overwrite,
+    ):
         if not state:
             raise PreventUpdate
+
+        # Parse the comma-separated notch frequencies. Skip empty tokens and
+        # invalid entries silently — the param sheet is fast-feedback, not a
+        # form-validation surface.
+        notch_freqs: list[float] = []
+        for token in (notch_text or "").replace(";", ",").split(","):
+            token = token.strip()
+            if not token:
+                continue
+            try:
+                notch_freqs.append(float(token))
+            except ValueError:
+                pass
+
+        # Collect the band rows back into a {name: [low, high]} dict. Dash
+        # delivers values and ids in matching order via ALL-pattern states.
+        bands_collected: dict[str, list[float]] = {}
+        for value, ident in zip(band_values or [], band_ids or []):
+            name = ident.get("name")
+            edge = ident.get("edge")
+            if not name or edge not in {"low", "high"}:
+                continue
+            slot = bands_collected.setdefault(name, [None, None])
+            slot[0 if edge == "low" else 1] = float(value) if value is not None else None
+        bands_payload = {
+            name: edges
+            for name, edges in bands_collected.items()
+            if edges[0] is not None and edges[1] is not None and edges[1] > edges[0]
+        }
+
+        params = {
+            "band": [float(low or 0.5), float(high or 300)],
+            "reference": str(reference or "CMR"),
+            "channels": "routed64",
+            "lfp_fs_hz": float(lfp_fs) if lfp_fs not in (None, "") else None,
+            "notch_freqs": notch_freqs,
+            "notch_q": float(notch_q or 30),
+            "window_sec": float(window_sec or 10),
+            "step_sec": float(step_sec or 5),
+            "bands": bands_payload,
+        }
+
+        # Batch path: state carries a list of (recording_id, well_id) targets
+        # collected from the filtered library rows. We resolve each to its
+        # raw_path + rec_name + label here, then submit them in one shot.
+        batch_targets = state.get("batch") if isinstance(state, dict) else None
+        if batch_targets:
+            specs = []
+            for target in batch_targets:
+                rid = target["recording_id"]
+                wid = target["well_id"]
+                rec = library.find_recording(rid)
+                well = library.find(rid, wid) if rec else None
+                specs.append(
+                    {
+                        "recording_id": rid,
+                        "well_id": wid,
+                        "raw_path": (well.raw_path if well else None) or (rec.raw_path if rec else None),
+                        "rec_name": well.rec_name if well else None,
+                        "recording_label": rec.label if rec else None,
+                        "well_label": _well_id_to_name(wid),
+                    }
+                )
+            results = backend.submit_batch(specs, params=params, overwrite=bool(overwrite))
+            errors = [r for r in results if "error" in r]
+            if errors and len(errors) == len(results):
+                msg = errors[0].get("error", "submission failed")
+                return "ax-sheet", msg, "ax-sheet-error", state
+            # Partial success is still a success for the UX — close the sheet.
+            return "ax-sheet hidden", "", "ax-sheet-error hidden", None
+
+        # Single-well path: existing behavior preserved.
         rid = state["recording_id"]
         wid = state["well_id"]
         rec = library.find_recording(rid)
         well = library.find(rid, wid) if rec else None
         raw_path = (well.raw_path if well else None) or (rec.raw_path if rec else None)
-        params = {
-            "band": [float(low or 0.5), float(high or 300)],
-            "reference": str(reference or "CAR"),
-            "decimation": int(decimation or 1),
-            "channels": "routed64",
-        }
         result = backend.submit(
             recording_id=rid,
             well_id=wid,
@@ -1097,6 +1297,60 @@ def _register_jobs_callbacks(app, library, backend, load_well_data):
         # Force a redraw on the next poll by returning no_update; the next
         # jobs-poll tick will refresh the drawer body.
         return no_update
+
+    # ── batch run: open params sheet pre-loaded with the filtered set ───
+    @app.callback(
+        Output("params-sheet-state", "data", allow_duplicate=True),
+        Output("params-sheet", "className", allow_duplicate=True),
+        Output("params-sheet-subtitle", "children", allow_duplicate=True),
+        Output("params-overwrite-row", "className", allow_duplicate=True),
+        Output("params-overwrite", "value", allow_duplicate=True),
+        Output("params-sheet-error", "children", allow_duplicate=True),
+        Output("params-sheet-error", "className", allow_duplicate=True),
+        Input("lib-batch-run-btn", "n_clicks"),
+        State({"type": "lib-row", "recording_id": ALL, "well_id": ALL,
+               "sample": ALL, "scan": ALL, "plate": ALL, "group": ALL}, "className"),
+        State({"type": "lib-row", "recording_id": ALL, "well_id": ALL,
+               "sample": ALL, "scan": ALL, "plate": ALL, "group": ALL}, "id"),
+        prevent_initial_call=True,
+    )
+    def on_batch_run(n_clicks, classnames, ids):
+        if not n_clicks:
+            raise PreventUpdate
+        # The rendered className carries our visibility marker — we collect
+        # only the rows the user can currently see (everything that matched
+        # the filter axes above).
+        targets = []
+        for className, ident in zip(classnames or [], ids or []):
+            if className and "hidden" in className.split():
+                continue
+            targets.append(
+                {
+                    "recording_id": ident["recording_id"],
+                    "well_id": ident["well_id"],
+                }
+            )
+        if not targets:
+            return (
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                no_update,
+                "Filter matches no wells.",
+                "ax-sheet-error",
+            )
+        subtitle = f"Batch · {len(targets)} well(s) selected"
+        state = {"batch": targets, "cache_exists": False}
+        return (
+            state,
+            "ax-sheet",
+            subtitle,
+            "ax-sheet-row",  # show overwrite row so user can opt into re-runs
+            [],
+            "",
+            "ax-sheet-error hidden",
+        )
 
     # ── workers slider ───────────────────────────────────────────────────
     @app.callback(

@@ -71,12 +71,20 @@ def test_export_dashboard_data_writes_lazy_loaded_trace_files(tmp_path):
     assert loaded["signals"] == ["raw", "lfp", "spike"]
     assert loaded["electrodes"][0]["electrode_id"] == 10
 
-    trace_path = tmp_path / "dashboard" / "data" / "traces" / "raw" / "10.json"
-    payload = json.loads(trace_path.read_text())
+    # The per-electrode metadata JSON now points at a sibling .npz that holds
+    # the float32 time_sec + value arrays at the LFP's full resolution. The
+    # JSON keeps the descriptive fields (electrode_id, channel_id, fs, …).
+    meta_path = tmp_path / "dashboard" / "data" / "traces" / "raw" / "10.json"
+    payload = json.loads(meta_path.read_text())
     assert payload["electrode_id"] == 10
     assert payload["channel_id"] == "a"
-    assert len(payload["time_sec"]) <= 100
-    assert len(payload["value"]) == len(payload["time_sec"])
+    assert payload["sample_rate_hz"] > 0
+    assert payload["num_samples"] <= 100  # the test passes max_points_per_electrode=100
+
+    trace_npz_path = tmp_path / "dashboard" / payload["trace_path"]
+    with np.load(trace_npz_path) as arr:
+        assert arr["time_sec"].shape == arr["value"].shape
+        assert arr["time_sec"].shape[0] == payload["num_samples"]
 
 
 def test_write_dashboard_html_references_lazy_data_manifest(tmp_path):

@@ -191,8 +191,19 @@ class WellData:
             if relative is None:
                 continue
             payload = _read_trace_json_cached(str(self.cache_dir / "dashboard" / relative))
-            time_arr = np.asarray(payload["time_sec"], dtype=float)
-            value_arr = np.asarray(payload["value"], dtype=float)
+            # New on-disk layout (1 kHz .npz alongside the metadata JSON):
+            #   {eid}.json — small meta with "trace_path" pointing at the npz
+            #   {eid}.npz  — float32 time_sec + value arrays at full resolution
+            # Legacy layout (everything in JSON, capped at 20k points) is
+            # still readable via the inline "time_sec" / "value" arrays.
+            trace_rel = payload.get("trace_path")
+            if trace_rel:
+                arrays = _read_trace_npz_cached(str(self.cache_dir / "dashboard" / trace_rel))
+                time_arr = arrays["time_sec"]
+                value_arr = arrays["value"]
+            else:
+                time_arr = np.asarray(payload["time_sec"], dtype=np.float32)
+                value_arr = np.asarray(payload["value"], dtype=np.float32)
             if t0 is not None or t1 is not None:
                 lo = -np.inf if t0 is None else float(t0)
                 hi = np.inf if t1 is None else float(t1)
@@ -272,6 +283,18 @@ def _read_trace_json_cached(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
 
+@lru_cache(maxsize=256)
+def _read_trace_npz_cached(path: str) -> dict:
+    # Load and keep arrays alive in the LRU. Each electrode-trace at 1 kHz
+    # for a 10-min recording is ~2.4 MB float32, so 256 entries ≈ 600 MB
+    # cap — fine for a single-user dashboard.
+    with np.load(path) as archive:
+        return {
+            "time_sec": archive["time_sec"].astype(np.float64, copy=False),
+            "value": archive["value"].astype(np.float32, copy=False),
+        }
+
+
 # -- Lazy SpikeInterface fallback ---------------------------------------
 
 
@@ -317,10 +340,8 @@ def _lazy_lfp_window(
     )
     traces = np.asarray(traces, dtype=np.float32)
 
-    n_samples = traces.shape[0]
-    # Decimate to ~_LAZY_TARGET_POINTS so plotly stays snappy.
-    step = max(1, n_samples // _LAZY_TARGET_POINTS)
-    if step > 1:
-        traces = traces[::step]
-    time_arr = (np.arange(traces.shape[0], dtype=np.float64) * step + start_frame) / fs
+    # Hand back full-resolution data — display decimation is done by
+    # plotly-resampler from the visible x-range, so a fixed stride here would
+    # silently cap the achievable zoom resolution.
+    time_arr = (np.arange(traces.shape[0], dtype=np.float64) + start_frame) / fs
     return time_arr, traces

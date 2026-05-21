@@ -64,10 +64,22 @@ def export_dashboard_data(
     electrodes: pd.DataFrame,
     band_power: pd.DataFrame,
     summary: dict,
-    max_points_per_electrode=20000,
+    max_points_per_electrode=None,
     include_signals=("raw", "lfp", "spike"),
 ) -> dict:
-    """Export dashboard data files for lazy loading by a static HTML page."""
+    """Export dashboard data files for lazy loading by the trace viewer.
+
+    Per-electrode traces are written as compressed NumPy ``.npz`` at the
+    recording's full sample rate (1 kHz for the LFP path after resample).
+    The dashboard's plotly-resampler integration aggregates from this
+    full-resolution source at display time, so we keep all detail on disk
+    and only decide point density inside the browser.
+
+    ``max_points_per_electrode`` is kept for backward compatibility (older
+    callers pass it explicitly). When given a positive value it caps the
+    on-disk length to that many points via stride decimation, matching the
+    legacy JSON behavior. Default ``None`` preserves full resolution.
+    """
     dashboard_dir = Path(dashboard_dir)
     data_dir = dashboard_dir / "data"
     traces_dir = data_dir / "traces"
@@ -82,28 +94,40 @@ def export_dashboard_data(
         recording = recordings[signal]
         fs = float(recording.get_sampling_frequency())
         num_samples = int(recording.get_num_samples())
-        step = max(1, int(np.ceil(num_samples / int(max_points_per_electrode))))
+        if max_points_per_electrode is not None and int(max_points_per_electrode) > 0:
+            step = max(1, int(np.ceil(num_samples / int(max_points_per_electrode))))
+        else:
+            step = 1
         sample_frames = np.arange(0, num_samples, step)
-        time_sec = sample_frames / fs
+        time_sec = (sample_frames / fs).astype(np.float32)
         signal_steps[signal] = int(step)
         signal_dir = traces_dir / signal
+        signal_dir.mkdir(parents=True, exist_ok=True)
         for row in recorded.itertuples(index=False):
             traces = get_traces_safe(recording, 0, num_samples, [row.channel_id])
-            values = np.asarray(traces[::step, 0], dtype=float)
-            payload = {
-                "signal": signal,
-                "signal_label": SIGNAL_LABELS.get(signal, signal),
-                "electrode_id": int(row.electrode_id),
-                "channel_id": row.channel_id,
-                "x_um": float(row.x_um),
-                "y_um": float(row.y_um),
-                "sample_step": int(step),
-                "time_sec": time_sec,
-                "value": values,
-            }
-            trace_path = signal_dir / f"{int(row.electrode_id)}.json"
-            _write_json(trace_path, payload)
-            trace_index[signal][str(int(row.electrode_id))] = str(trace_path.relative_to(dashboard_dir))
+            values = np.asarray(traces[::step, 0], dtype=np.float32)
+            # Per-electrode .npz at full resolution. Meta scalars are kept in
+            # a small JSON header file alongside (avoids string encoding
+            # awkwardness in numpy archives).
+            trace_path = signal_dir / f"{int(row.electrode_id)}.npz"
+            np.savez_compressed(trace_path, time_sec=time_sec, value=values)
+            meta_path = signal_dir / f"{int(row.electrode_id)}.json"
+            _write_json(
+                meta_path,
+                {
+                    "signal": signal,
+                    "signal_label": SIGNAL_LABELS.get(signal, signal),
+                    "electrode_id": int(row.electrode_id),
+                    "channel_id": row.channel_id,
+                    "x_um": float(row.x_um),
+                    "y_um": float(row.y_um),
+                    "sample_step": int(step),
+                    "sample_rate_hz": float(fs),
+                    "num_samples": int(values.shape[0]),
+                    "trace_path": str(trace_path.relative_to(dashboard_dir)),
+                },
+            )
+            trace_index[signal][str(int(row.electrode_id))] = str(meta_path.relative_to(dashboard_dir))
 
     electrodes_payload = _clean_records(recorded)
     band_power_payload = _clean_records(

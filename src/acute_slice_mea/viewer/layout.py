@@ -23,6 +23,53 @@ from acute_slice_mea.library import LibraryIndex, RecordingEntry, WellEntry
 PRESET_WINDOW_SECONDS = [1, 2, 5, 10, 30]
 DEFAULT_WINDOW_SECONDS = 5
 
+# Seed values for the editable power-band rows in the params sheet. The
+# names match ``acute_slice_mea.spectral.DEFAULT_LFP_BANDS`` so changes here
+# round-trip cleanly through the pipeline.
+DEFAULT_BAND_ROWS: list[tuple[str, float, float]] = [
+    ("delta", 0.5, 4.0),
+    ("theta", 4.0, 8.0),
+    ("alpha", 8.0, 12.0),
+    ("beta", 12.0, 30.0),
+    ("low_gamma", 30.0, 80.0),
+    ("high_gamma", 80.0, 150.0),
+]
+
+
+def _build_band_rows() -> list:
+    """Render the editable band rows. Each row carries a pattern-matched
+    id ``{"type": "param-band", "name": <band>, "edge": "low"|"high"}`` so
+    a single ``State({"type": "param-band", ...}, "value")`` collects all
+    six bands in one shot in the submit callback.
+    """
+    rows = []
+    for name, low, high in DEFAULT_BAND_ROWS:
+        rows.append(
+            html.Div(
+                className="ax-sheet-band-row",
+                children=[
+                    html.Span(name, className="ax-sheet-band-name"),
+                    dcc.Input(
+                        id={"type": "param-band", "name": name, "edge": "low"},
+                        type="number",
+                        value=low,
+                        min=0.0,
+                        step=0.5,
+                        className="ax-sheet-input ax-sheet-input-narrow",
+                    ),
+                    dcc.Input(
+                        id={"type": "param-band", "name": name, "edge": "high"},
+                        type="number",
+                        value=high,
+                        min=0.0,
+                        step=0.5,
+                        className="ax-sheet-input ax-sheet-input-narrow",
+                    ),
+                ],
+            )
+        )
+    return rows
+
 # 4 x 6 MaxWell 24-well plate. We render the *fixed* layout; missing wells
 # are styled differently based on whether they appear in the recording.
 PLATE_ROWS = ["A", "B", "C", "D"]
@@ -57,11 +104,14 @@ def build_layout(library: LibraryIndex, *, jobs_enabled: bool = False) -> html.D
         dcc.Store(id="time-window", data=[0.0, float(DEFAULT_WINDOW_SECONDS)]),
         dcc.Store(id="gain", data=1.0),
         dcc.Store(id="well-version", data=0),
+        # jobs-poll is included even in view-only mode so the library-filter
+        # callback (which lists this as an Input) is always satisfied. The
+        # interval is harmless when there is no jobs backend to query.
+        dcc.Interval(id="jobs-poll", interval=JOBS_POLL_INTERVAL_MS),
     ]
     if jobs_enabled:
         children.extend(
             [
-                dcc.Interval(id="jobs-poll", interval=JOBS_POLL_INTERVAL_MS),
                 dcc.Store(id="jobs-drawer-open", data=False),
                 dcc.Store(id="params-sheet-state", data=None),
                 _jobs_drawer(),
@@ -164,6 +214,13 @@ def _compute_controls() -> list:
 
 def _library_pane(library: LibraryIndex, *, jobs_enabled: bool) -> html.Aside:
     grouped = library.grouped_by_date()
+    sample_options = _unique_options([r.sample for r in library.recordings])
+    scan_options = _unique_options([r.scan for r in library.recordings])
+    plate_options = _unique_options([r.plate for r in library.recordings])
+    # Per-well groupnames (post-metadata extraction).
+    group_options = _unique_options(
+        [w.group for r in library.recordings for w in r.wells if w.group]
+    )
     return html.Aside(
         className="pane pane-library",
         children=[
@@ -186,6 +243,13 @@ def _library_pane(library: LibraryIndex, *, jobs_enabled: bool) -> html.Aside:
                     ),
                 ],
             ),
+            _library_filter_bar(
+                sample_options=sample_options,
+                scan_options=scan_options,
+                plate_options=plate_options,
+                group_options=group_options,
+                jobs_enabled=jobs_enabled,
+            ),
             html.Div(
                 id="library-list",
                 className="lib-scroll",
@@ -201,6 +265,112 @@ def _library_pane(library: LibraryIndex, *, jobs_enabled: bool) -> html.Aside:
             ),
         ],
     )
+
+
+def _unique_options(values) -> list[dict]:
+    """Return a sorted list of dropdown options from observed values."""
+    uniq = sorted({str(v) for v in values if v})
+    return [{"label": v, "value": v} for v in uniq]
+
+
+def _library_filter_bar(
+    *,
+    sample_options: list[dict],
+    scan_options: list[dict],
+    plate_options: list[dict],
+    group_options: list[dict],
+    jobs_enabled: bool,
+) -> html.Div:
+    """Render the multi-axis filter row above the library list.
+
+    Each Dropdown is multi-select; combining them is AND across axes, OR
+    within an axis. Filters intersect (not subtract) — leaving a dropdown
+    empty means "any value passes" for that axis.
+    """
+    cache_state_options = [
+        {"label": "Cached", "value": "cached"},
+        {"label": "Queued", "value": "queued"},
+        {"label": "Running", "value": "running"},
+        {"label": "Failed", "value": "failed"},
+        {"label": "Not built", "value": "idle"},
+    ]
+    children = [
+        dcc.Dropdown(
+            id="lib-filter-sample",
+            options=sample_options,
+            multi=True,
+            placeholder="Sample",
+            className="lib-filter-dd",
+        ),
+        dcc.Dropdown(
+            id="lib-filter-scan",
+            options=scan_options,
+            multi=True,
+            placeholder="Scan type",
+            className="lib-filter-dd",
+        ),
+        dcc.Dropdown(
+            id="lib-filter-plate",
+            options=plate_options,
+            multi=True,
+            placeholder="Plate",
+            className="lib-filter-dd",
+        ),
+    ]
+    if group_options:
+        children.append(
+            dcc.Dropdown(
+                id="lib-filter-group",
+                options=group_options,
+                multi=True,
+                placeholder="Group / condition",
+                className="lib-filter-dd",
+            )
+        )
+    else:
+        # Still register the component so the filter callback's Input list
+        # is stable across libraries that lack groupname metadata.
+        children.append(
+            dcc.Dropdown(
+                id="lib-filter-group",
+                options=[],
+                multi=True,
+                placeholder="Group / condition (none found)",
+                className="lib-filter-dd",
+                disabled=True,
+            )
+        )
+    if jobs_enabled:
+        children.extend(
+            [
+                dcc.Dropdown(
+                    id="lib-filter-cache",
+                    options=cache_state_options,
+                    multi=True,
+                    placeholder="Cache state",
+                    className="lib-filter-dd",
+                ),
+                html.Button(
+                    "Run analysis on filtered",
+                    id="lib-batch-run-btn",
+                    n_clicks=0,
+                    className="btn small primary lib-batch-run",
+                ),
+            ]
+        )
+    else:
+        # Placeholder cache-filter so the callback always has the input.
+        children.append(
+            dcc.Dropdown(
+                id="lib-filter-cache",
+                options=cache_state_options,
+                multi=True,
+                placeholder="Cache state",
+                className="lib-filter-dd",
+                disabled=True,
+            )
+        )
+    return html.Div(className="lib-filter-bar", children=children)
 
 
 def _library_group(date: str, items: list[RecordingEntry], *, jobs_enabled: bool) -> html.Div:
@@ -253,7 +423,19 @@ def _library_item(rec: RecordingEntry, *, jobs_enabled: bool) -> html.Div:
     # well only. Multi-well per-recording batch is deferred — see the plan.
     target_well: WellEntry | None = rec.wells[0] if rec.wells else None
     well_id = target_well.well_id if target_well else "—"
+    # Pattern-matched id carries the filter axes; the library-filter callback
+    # reads these from State to decide each row's visibility.
+    row_id = {
+        "type": "lib-row",
+        "recording_id": rec.recording_id,
+        "well_id": well_id,
+        "sample": rec.sample,
+        "scan": rec.scan,
+        "plate": rec.plate,
+        "group": (target_well.group if target_well else "") or "",
+    }
     return html.Div(
+        id=row_id,
         className="lib-row-wrap",
         children=[
             select_btn,
@@ -561,10 +743,15 @@ def _params_sheet() -> html.Div:
                                     dcc.RadioItems(
                                         id="params-reference",
                                         options=[
-                                            {"label": "Common avg. (CAR)", "value": "CAR"},
+                                            # CAR is kept as a label for backward
+                                            # compatibility with prior caches.
+                                            # The CMR (median) operator is the
+                                            # one that's actually been in use.
+                                            {"label": "CMR (median)", "value": "CMR"},
+                                            {"label": "CAR (mean)", "value": "MEAN"},
                                             {"label": "None", "value": "none"},
                                         ],
-                                        value="CAR",
+                                        value="CMR",
                                         className="ax-sheet-radio",
                                         labelStyle={"marginRight": "12px"},
                                     ),
@@ -573,15 +760,83 @@ def _params_sheet() -> html.Div:
                             html.Div(
                                 className="ax-sheet-row",
                                 children=[
-                                    html.Label("Decimation", className="ax-sheet-label"),
+                                    html.Label("LFP target fs (Hz)", className="ax-sheet-label"),
                                     dcc.Input(
-                                        id="params-decimation",
+                                        id="params-lfp-fs",
                                         type="number",
-                                        value=1,
+                                        value=1000,
+                                        min=100,
+                                        max=10000,
+                                        step=100,
+                                        className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Notch (Hz, comma-sep.)", className="ax-sheet-label"),
+                                    dcc.Input(
+                                        id="params-notch",
+                                        type="text",
+                                        value="",
+                                        placeholder="e.g. 50,100  or  60,120",
+                                        className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Notch Q", className="ax-sheet-label"),
+                                    dcc.Input(
+                                        id="params-notch-q",
+                                        type="number",
+                                        value=30,
                                         min=1,
-                                        max=16,
+                                        max=200,
                                         step=1,
                                         className="ax-sheet-input",
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row",
+                                children=[
+                                    html.Label("Band-power window / step (s)", className="ax-sheet-label"),
+                                    html.Div(
+                                        className="ax-sheet-pair",
+                                        children=[
+                                            dcc.Input(
+                                                id="params-window-sec",
+                                                type="number",
+                                                value=10,
+                                                min=0.5,
+                                                max=120,
+                                                step=0.5,
+                                                className="ax-sheet-input",
+                                            ),
+                                            dcc.Input(
+                                                id="params-step-sec",
+                                                type="number",
+                                                value=5,
+                                                min=0.1,
+                                                max=60,
+                                                step=0.1,
+                                                className="ax-sheet-input",
+                                            ),
+                                        ],
+                                    ),
+                                ],
+                            ),
+                            html.Div(
+                                className="ax-sheet-row ax-sheet-bands",
+                                children=[
+                                    html.Label("Power bands (Hz)", className="ax-sheet-label"),
+                                    html.Div(
+                                        id="params-bands-rows",
+                                        className="ax-sheet-bands-rows",
+                                        children=_build_band_rows(),
                                     ),
                                 ],
                             ),

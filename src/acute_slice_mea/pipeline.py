@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import json
+import logging
 from pathlib import Path
 import shutil
 import sys
 from time import perf_counter
+
+logger = logging.getLogger(__name__)
 
 from acute_slice_mea.bursts import compute_bursts_from_recording
 from acute_slice_mea.cache import save_cache_bundle
@@ -67,8 +70,18 @@ class AnalysisConfig:
     apply_spike_common_reference: bool = True
     lfp_filter_margin_ms: int = 10000
     lfp_ignore_low_freq_error: bool = True
-    lfp_target_fs_hz: float | None = 1000.0
     lfp_target_fs_hz: float | None = 1000
+    # Optional list of line frequencies (Hz) to notch out of the LFP path,
+    # e.g. [50.0] or [60.0, 120.0]. ``lfp_notch_q`` is the (shared) quality
+    # factor applied to each notch.
+    lfp_notch_freqs: list[float] | None = None
+    lfp_notch_q: float = 30.0
+    # Common reference operator on the LFP path: ``"mean"`` for CAR or
+    # ``"median"`` for CMR. Median is more robust to single-channel outliers.
+    lfp_reference_operator: str = "median"
+    # Override the default 6 LFP bands for band-power computation. When None
+    # the standard delta/theta/alpha/beta/low_gamma/high_gamma set is used.
+    lfp_bands: dict[str, tuple[float, float]] | None = None
     n_jobs: int = 1
     channel_chunk_size: int | None = None
     cache_lfp_to_disk: bool = True
@@ -85,8 +98,23 @@ def _log_verbose(config: AnalysisConfig, message: str) -> None:
         print(message, file=sys.stderr)
 
 
-def run_analysis(config: AnalysisConfig) -> dict:
-    """Run the heavy analysis pipeline and write cache outputs."""
+def run_analysis(config: AnalysisConfig, progress_callback=None) -> dict:
+    """Run the heavy analysis pipeline and write cache outputs.
+
+    ``progress_callback`` (when given) is invoked as ``cb(stage, fraction)``
+    at the start of each pipeline stage with ``fraction`` in [0, 1]. The
+    job_runner uses this to drive the progress bar in the dashboard. The
+    callback runs synchronously in this thread; keep it cheap.
+    """
+
+    def _notify(stage: str, fraction: float) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(stage, float(fraction))
+        except Exception:  # never let a UI hook break the pipeline
+            logger.exception("progress_callback raised")
+
     started = perf_counter()
     output_dir = Path(config.output_dir)
     figures_dir = output_dir / "figures"
@@ -97,8 +125,10 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
         si.set_global_job_kwargs(chunk_duration=config.spikeinterface_chunk_duration)
 
+    _notify("loading", 0.05)
     _log_verbose(config, "Loading recording")
     raw = load_maxwell_recording(config.data_path, config.well_id, rec_name=config.rec_name)
+    _notify("preparing", 0.12)
     _log_verbose(config, "Preparing recordings")
     recordings = prepare_recordings(
         raw,
@@ -111,6 +141,9 @@ def run_analysis(config: AnalysisConfig) -> dict:
         lfp_filter_margin_ms=config.lfp_filter_margin_ms,
         lfp_ignore_low_freq_error=config.lfp_ignore_low_freq_error,
         lfp_target_fs_hz=config.lfp_target_fs_hz,
+        lfp_notch_freqs=config.lfp_notch_freqs,
+        lfp_notch_q=config.lfp_notch_q,
+        lfp_reference_operator=config.lfp_reference_operator,
     )
     metadata_recording = recordings["lfp"]
     fs = float(metadata_recording.get_sampling_frequency())
@@ -131,7 +164,9 @@ def run_analysis(config: AnalysisConfig) -> dict:
             progress=config.progress,
         )
 
+    _notify("band_power", 0.30)
     _log_verbose(config, "Computing LFP band power")
+    bands_for_power = config.lfp_bands or DEFAULT_LFP_BANDS
     band_power = compute_lfp_band_power_over_time(
         recordings["lfp"],
         electrode_table=electrodes,
@@ -139,7 +174,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         end_sec=None,
         window_sec=config.lfp_window_sec,
         step_sec=config.lfp_step_sec,
-        bands=DEFAULT_LFP_BANDS,
+        bands=bands_for_power,
         welch_segment_sec=config.welch_segment_sec,
         n_jobs=config.n_jobs,
         channel_chunk_size=config.channel_chunk_size,
@@ -149,6 +184,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
     if preview_electrode_ids is None and config.preview_max_electrodes is not None:
         preview_electrode_ids = recorded["electrode_id"].astype(int).head(config.preview_max_electrodes).tolist()
 
+    _notify("spectrum", 0.55)
     spectrum: dict | None = None
     if config.compute_spectrum:
         _log_verbose(config, "Computing spectrum summary")
@@ -163,6 +199,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
             progress=config.progress,
         )
 
+    _notify("trace_preview", 0.70)
     trace_preview: dict | None = None
     if config.compute_trace_preview:
         _log_verbose(config, "Computing trace preview")
@@ -177,6 +214,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
     else:
         preview_electrode_ids = None
 
+    _notify("bursts", 0.82)
     bursts: list[dict] | None = None
     if config.compute_bursts:
         _log_verbose(config, "Detecting network bursts")
@@ -204,6 +242,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         _log_verbose(config, "Building probe geometry")
         probe_geometry = build_probe_geometry(electrodes)
 
+    _notify("saving", 0.95)
     elapsed_sec = perf_counter() - started
     summary = {
         **asdict(config),

@@ -266,6 +266,22 @@ button { font-family: inherit; }
   color: var(--ink-3);
 }
 
+/* ─── Library filter bar ─────────────────────────────────────── */
+.lib-filter-bar {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  padding: 8px 16px 6px;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.lib-filter-dd {
+  flex: 1 1 calc(50% - 6px);
+  min-width: 130px;
+  font-size: 11.5px;
+}
+.lib-batch-run {
+  flex: 1 1 100%;
+  margin-top: 2px;
+}
+
 /* ─────────────────────────────────────────────────────────── Center column */
 .center-col {
   display: grid;
@@ -782,6 +798,23 @@ button { font-family: inherit; }
   border-radius: 6px;
   background: var(--paper);
   width: 110px;
+}
+.ax-sheet-input-narrow { width: 60px; }
+.ax-sheet-pair { display: flex; gap: 6px; }
+.ax-sheet-bands { align-items: flex-start; }
+.ax-sheet-bands-rows {
+  display: flex; flex-direction: column; gap: 4px;
+}
+.ax-sheet-band-row {
+  display: grid;
+  grid-template-columns: 90px 60px 60px;
+  gap: 6px;
+  align-items: center;
+  font-size: 11.5px;
+}
+.ax-sheet-band-name {
+  font-family: var(--font-mono);
+  color: var(--ink-2);
 }
 .ax-sheet-radio label { font-size: 12px; }
 .ax-sheet-overwrite { font-size: 12px; }
