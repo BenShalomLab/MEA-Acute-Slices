@@ -82,3 +82,102 @@ def test_find_returns_none_for_unknown_well(tmp_path):
     index = LibraryIndex([], mode="cache", root=str(tmp_path))
     assert index.find("missing", "well000") is None
     assert index.find_recording("missing") is None
+
+
+def test_data_and_cache_overlay_marks_cached_wells(tmp_path, monkeypatch):
+    """Merged factory surfaces every raw recording, overlays cache metadata."""
+    sample_root = tmp_path / "MeaSlices_Example"
+    raw_path = sample_root / "260408" / "16719" / "ActivityScan" / "000001" / "data.raw.h5"
+    raw_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(b"")
+
+    cache_root = tmp_path / "cache"
+    bundle = (
+        cache_root
+        / "MeaSlices_Example"
+        / "260408"
+        / "16719"
+        / "ActivityScan"
+        / "000001"
+        / "well000"
+    )
+    bundle.mkdir(parents=True)
+    summary = {
+        "well_id": "well000",
+        "data_path": str(raw_path),
+        "sampling_frequency_hz": 20000.0,
+        "duration_sec": 300.0,
+        "num_recorded_electrodes": 256,
+    }
+    (bundle / "manifest.json").write_text(json.dumps({"summary": summary, "files": {}}))
+
+    import acute_slice_mea.library as lib
+
+    monkeypatch.setattr(
+        lib,
+        "_list_wells_and_recs_from_h5",
+        lambda p: [("well000", None), ("well001", None)],
+    )
+    index = LibraryIndex.from_data_and_cache_root(sample_root, cache_root)
+    assert index.mode == "data+cache"
+    rec = index.recordings[0]
+    cached_well = next(w for w in rec.wells if w.well_id == "well000")
+    fresh_well = next(w for w in rec.wells if w.well_id == "well001")
+    assert cached_well.cache_dir is not None
+    assert cached_well.duration_sec == 300.0
+    assert cached_well.num_recorded_electrodes == 256
+    assert fresh_well.cache_dir is None
+
+
+def test_data_and_cache_overlay_handles_multi_rec_recordings(tmp_path, monkeypatch):
+    """Multi-rec files expand to one RecordingEntry per rec; overlay lands on
+    cache dirs that include the rec_name segment under ``run/``."""
+    sample_root = tmp_path / "MeaSlices_Example"
+    raw_path = sample_root / "260408" / "16719" / "ActivityScan" / "000002" / "data.raw.h5"
+    raw_path.parent.mkdir(parents=True)
+    raw_path.write_bytes(b"")
+
+    cache_root = tmp_path / "cache"
+    # Only rec0000 / well000 has a cache; rec0001 / well000 is uncached.
+    bundle = (
+        cache_root
+        / "MeaSlices_Example"
+        / "260408"
+        / "16719"
+        / "ActivityScan"
+        / "000002"
+        / "rec0000"
+        / "well000"
+    )
+    bundle.mkdir(parents=True)
+    (bundle / "manifest.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "sampling_frequency_hz": 20000.0,
+                    "duration_sec": 120.0,
+                    "num_recorded_electrodes": 128,
+                },
+                "files": {},
+            }
+        )
+    )
+
+    import acute_slice_mea.library as lib
+
+    monkeypatch.setattr(
+        lib,
+        "_list_wells_and_recs_from_h5",
+        lambda p: [("well000", "rec0000"), ("well000", "rec0001")],
+    )
+    index = LibraryIndex.from_data_and_cache_root(sample_root, cache_root)
+    rec_ids = sorted(r.recording_id for r in index.recordings)
+    assert rec_ids == [
+        "MeaSlices_Example/260408/16719/ActivityScan/000002/rec0000",
+        "MeaSlices_Example/260408/16719/ActivityScan/000002/rec0001",
+    ]
+    cached_rec = next(r for r in index.recordings if r.recording_id.endswith("rec0000"))
+    fresh_rec = next(r for r in index.recordings if r.recording_id.endswith("rec0001"))
+    assert cached_rec.wells[0].cache_dir is not None
+    assert cached_rec.wells[0].duration_sec == 120.0
+    assert fresh_rec.wells[0].cache_dir is None
