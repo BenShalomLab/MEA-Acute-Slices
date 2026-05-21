@@ -13,7 +13,7 @@ from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
-from dash import ALL, Input, Output, State, callback_context, ctx, html, no_update
+from dash import ALL, Input, Output, Patch, State, callback_context, ctx, html, no_update
 from dash.exceptions import PreventUpdate
 
 from acute_slice_mea.library import LibraryIndex, RecordingEntry, WellEntry
@@ -188,16 +188,42 @@ def register_all(app, library: LibraryIndex) -> None:
 
     # -- probe map ----------------------------------------------------
 
+    # Build the probe-map figure only when the well itself changes. Taking
+    # `selected-channels` as an Input here would emit a brand-new figure on
+    # every selection change, dropping Plotly's in-figure selectedData state
+    # and racing the user's lasso event. The selection highlight is patched
+    # in a separate callback below so the figure object is never replaced
+    # mid-selection.
     @app.callback(
         Output("probe-map", "figure"),
         Input("well-version", "data"),
-        Input("selected-channels", "data"),
+        State("selected-channels", "data"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
     )
     def render_probe_map(_version, selected_channels, recording_id, well_id):
         wd = _well_data(recording_id, well_id)
         return _build_probe_map_figure(wd, selected_channels or [])
+
+    @app.callback(
+        Output("probe-map", "figure", allow_duplicate=True),
+        Input("selected-channels", "data"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        prevent_initial_call=True,
+    )
+    def patch_probe_selection(selected_channels, recording_id, well_id):
+        wd = _well_data(recording_id, well_id)
+        if wd is None:
+            raise PreventUpdate
+        order = _routed_eid_order(wd)
+        if not order:
+            raise PreventUpdate
+        selected_set = set(int(eid) for eid in (selected_channels or []))
+        indices = [i for i, eid in enumerate(order) if eid in selected_set]
+        patch = Patch()
+        patch["data"][0]["selectedpoints"] = indices or None
+        return patch
 
     @app.callback(
         Output("selected-channels", "data", allow_duplicate=True),
@@ -212,13 +238,87 @@ def register_all(app, library: LibraryIndex) -> None:
         wd = _well_data(recording_id, well_id)
         if wd is None:
             raise PreventUpdate
-        chosen = []
+        order = _routed_eid_order(wd)
+        if not order:
+            raise PreventUpdate
+        # Plotly.js canonical pattern: identify selected points by zero-based
+        # trace index `pointNumber` (https://plotly.com/javascript/lasso-selection/).
+        # customdata can come back as None on synthetic selectedData events
+        # fired during figure rebuilds, which silently dropped selections in
+        # the previous implementation.
+        chosen: list[int] = []
         for point in selected_data["points"]:
-            eid = point.get("customdata")
-            if eid is None:
+            idx = point.get("pointNumber")
+            if idx is None:
+                idx = point.get("pointIndex")
+            if idx is None or idx < 0 or idx >= len(order):
                 continue
-            chosen.append(int(eid))
+            chosen.append(order[idx])
+        if not chosen:
+            # Empty selectedData (deselect / lasso over empty space / synthetic
+            # event on figure replacement) must not wipe the current selection —
+            # the "None" quick-select chip is the explicit way to clear.
+            raise PreventUpdate
         return sorted(set(chosen))
+
+    @app.callback(
+        Output("selected-channels", "data", allow_duplicate=True),
+        Input("probe-map", "clickData"),
+        State("selected-channels", "data"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        prevent_initial_call=True,
+    )
+    def on_probe_click(click_data, current, recording_id, well_id):
+        # Single-click toggles one electrode. Reliable fallback when lasso/box
+        # drag misbehaves on a given browser, and a way to fine-tune an
+        # existing selection without restarting it.
+        if not click_data or not click_data.get("points"):
+            raise PreventUpdate
+        wd = _well_data(recording_id, well_id)
+        if wd is None:
+            raise PreventUpdate
+        order = _routed_eid_order(wd)
+        if not order:
+            raise PreventUpdate
+        point = click_data["points"][0]
+        idx = point.get("pointNumber")
+        if idx is None:
+            idx = point.get("pointIndex")
+        if idx is None or idx < 0 or idx >= len(order):
+            raise PreventUpdate
+        eid = order[idx]
+        current_set = set(int(c) for c in (current or []))
+        if eid in current_set:
+            current_set.discard(eid)
+        else:
+            current_set.add(eid)
+        return sorted(current_set)
+
+    @app.callback(
+        Output("selected-channels", "data", allow_duplicate=True),
+        Input("electrode-id-entry", "n_submit"),
+        State("electrode-id-entry", "value"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        prevent_initial_call=True,
+    )
+    def on_electrode_id_entry(_submits, text, recording_id, well_id):
+        # Always-works fallback: paste CSV with optional ranges, e.g.
+        # "500-520, 550, 600-610". IDs outside the routed set are silently
+        # dropped so pasted over-broad lists still work.
+        if not text or not text.strip():
+            raise PreventUpdate
+        wd = _well_data(recording_id, well_id)
+        if wd is None:
+            raise PreventUpdate
+        valid = set(wd.routed_electrode_ids())
+        if not valid:
+            raise PreventUpdate
+        chosen = _parse_electrode_id_input(text, valid)
+        if not chosen:
+            raise PreventUpdate
+        return chosen
 
     # -- quick-select chips ------------------------------------------
 
@@ -416,6 +516,65 @@ def register_all(app, library: LibraryIndex) -> None:
 # =============================================================================
 
 
+def _routed_entries(wd: WellData) -> list[dict]:
+    """Deterministic routed-electrode list shared by figure build and
+    selection-event lookup. Falls back to electrodes.csv when probe.json
+    is missing so both callers stay in lockstep on the eid order.
+    """
+    routed = (wd.probe or {}).get("routed") or []
+    if routed:
+        return list(routed)
+    recorded = wd.electrodes[wd.electrodes["recorded"].astype(bool)]
+    has_rms = "rms_uv" in recorded.columns
+    return [
+        {
+            "electrode_id": int(row.electrode_id),
+            "x_um": float(row.x_um),
+            "y_um": float(row.y_um),
+            "rms_uv": float(getattr(row, "rms_uv", float("nan"))) if has_rms else None,
+        }
+        for row in recorded.itertuples(index=False)
+    ]
+
+
+def _routed_eid_order(wd: WellData) -> list[int]:
+    return [int(r["electrode_id"]) for r in _routed_entries(wd)]
+
+
+def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
+    """Parse a CSV/range string into a sorted list of routed eids.
+
+    Accepts comma- or whitespace-separated tokens; each token is either an
+    integer or an ``a-b`` inclusive range. IDs outside ``valid`` are
+    silently dropped.
+    """
+    chosen: set[int] = set()
+    for raw in text.replace(",", " ").split():
+        token = raw.strip()
+        if not token:
+            continue
+        if "-" in token:
+            try:
+                lo_str, hi_str = token.split("-", 1)
+                lo = int(lo_str)
+                hi = int(hi_str)
+            except ValueError:
+                continue
+            if hi < lo:
+                lo, hi = hi, lo
+            for eid in range(lo, hi + 1):
+                if eid in valid:
+                    chosen.add(eid)
+        else:
+            try:
+                eid = int(token)
+            except ValueError:
+                continue
+            if eid in valid:
+                chosen.add(eid)
+    return sorted(chosen)
+
+
 def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -> go.Figure:
     fig = go.Figure()
     # Full chip grid as a faint backdrop. We draw it as a single shape rather
@@ -433,19 +592,7 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         fig.update_layout(_probe_map_layout(empty=True))
         return fig
 
-    routed = (wd.probe or {}).get("routed") or []
-    if not routed:
-        # Fall back to electrodes.csv if probe.json is missing.
-        recorded = wd.electrodes[wd.electrodes["recorded"].astype(bool)]
-        routed = [
-            {
-                "electrode_id": int(row.electrode_id),
-                "x_um": float(row.x_um),
-                "y_um": float(row.y_um),
-                "rms_uv": float(getattr(row, "rms_uv", float("nan"))) if "rms_uv" in recorded.columns else None,
-            }
-            for row in recorded.itertuples(index=False)
-        ]
+    routed = _routed_entries(wd)
 
     selected_set = set(int(eid) for eid in selected_channels)
     rms_values = [r.get("rms_uv") for r in routed if r.get("rms_uv") is not None]
@@ -460,13 +607,17 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         rms = entry.get("rms_uv")
         intensity = 0.0 if rms is None or rms_max == 0 else min(1.0, float(rms) / rms_max)
         colors.append(_interp_color(intensity))
-        # Pixel sizing. At chip-fit zoom the 17.5 μm pitch is ~3 px wide, so
-        # markers must stay tiny or they drown the grid. Selected state below
-        # bumps to 6 px with an outline so the highlight reads at any zoom.
-        sizes.append(2 + 2 * intensity)
+        # Lasso needs markers big enough for Plotly's hit-test to find them
+        # under the drawn path. 5–8 px is the working range; smaller markers
+        # made box/lasso silently fail in WebGL.
+        sizes.append(5 + 3 * intensity)
 
+    # SVG Scatter (not Scattergl) — at ~hundreds of routed electrodes the
+    # SVG cost is fine, and SVG hit-testing for lasso/box select is reliable
+    # across Plotly versions and browsers. Scattergl's selection was the
+    # primary cause of the broken probe-map picker.
     fig.add_trace(
-        go.Scattergl(
+        go.Scatter(
             x=xs, y=ys,
             customdata=custom,
             mode="markers",
@@ -478,18 +629,20 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             ),
             hovertemplate="E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>",
             selectedpoints=[i for i, eid in enumerate(custom) if eid in selected_set] or None,
-            # scattergl.selected.Marker only supports color/opacity/size — no
-            # line/outline. Use color + a modest size bump for the highlight.
-            selected=dict(marker=dict(color=TRACE_COLOR, size=6)),
+            selected=dict(marker=dict(color=TRACE_COLOR, size=8, opacity=1.0)),
             unselected=dict(marker=dict(opacity=0.55)),
         )
     )
 
-    fig.update_layout(_probe_map_layout())
+    # uirevision keyed by (recording, well) keeps Plotly's drag-mode and
+    # in-progress lasso strokes alive across the figure rebuilds triggered by
+    # `selected-channels` updates.
+    revision = f"{wd.cache_dir}" if wd is not None else "empty"
+    fig.update_layout(_probe_map_layout(uirevision=revision))
     return fig
 
 
-def _probe_map_layout(*, empty: bool = False) -> dict:
+def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict:
     return dict(
         margin=dict(l=8, r=8, t=8, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
@@ -512,6 +665,7 @@ def _probe_map_layout(*, empty: bool = False) -> dict:
         ),
         showlegend=False,
         dragmode="lasso",
+        uirevision=uirevision,
         annotations=[]
         if not empty
         else [
