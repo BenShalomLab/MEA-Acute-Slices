@@ -65,7 +65,8 @@ def export_dashboard_data(
     band_power: pd.DataFrame,
     summary: dict,
     max_points_per_electrode=None,
-    include_signals=("raw", "lfp", "spike"),
+    include_signals=("lfp",),
+    progress_callback=None,
 ) -> dict:
     """Export dashboard data files for lazy loading by the trace viewer.
 
@@ -75,10 +76,19 @@ def export_dashboard_data(
     full-resolution source at display time, so we keep all detail on disk
     and only decide point density inside the browser.
 
+    Only the LFP signal is exported by default — this codebase analyses
+    LFP only, and the trace viewer reads ``lfp`` from the materialized
+    on-disk binary. Callers that need raw/spike previews can opt back in
+    by passing ``include_signals=("raw", "lfp", "spike")``.
+
     ``max_points_per_electrode`` is kept for backward compatibility (older
     callers pass it explicitly). When given a positive value it caps the
     on-disk length to that many points via stride decimation, matching the
     legacy JSON behavior. Default ``None`` preserves full resolution.
+
+    ``progress_callback(fraction)`` is invoked periodically during the
+    per-electrode loop (``fraction`` in [0, 1]) so the job runner can drive
+    a smooth progress bar through the saving phase.
     """
     dashboard_dir = Path(dashboard_dir)
     data_dir = dashboard_dir / "data"
@@ -90,6 +100,19 @@ def export_dashboard_data(
 
     trace_index: dict[str, dict[str, str]] = {signal: {} for signal in signals}
     signal_steps: dict[str, int] = {}
+    # Progress is reported over the total electrode×signal write count so the
+    # bar advances per electrode regardless of how many signals are exported.
+    total_writes = int(len(recorded) * len(signals))
+    writes_done = 0
+
+    def _report_progress() -> None:
+        if progress_callback is None or total_writes == 0:
+            return
+        try:
+            progress_callback(writes_done / total_writes)
+        except Exception:  # never let a UI hook break the export
+            pass
+
     for signal in signals:
         recording = recordings[signal]
         fs = float(recording.get_sampling_frequency())
@@ -128,6 +151,8 @@ def export_dashboard_data(
                 },
             )
             trace_index[signal][str(int(row.electrode_id))] = str(meta_path.relative_to(dashboard_dir))
+            writes_done += 1
+            _report_progress()
 
     electrodes_payload = _clean_records(recorded)
     band_power_payload = _clean_records(

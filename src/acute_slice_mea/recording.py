@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
+import functools
+import inspect
+import os
 import shutil
 from pathlib import Path
+
+
+def _default_save_n_jobs() -> int:
+    # Cap at 4 workers. Each materialize_lfp worker holds the bandpass
+    # margin's worth of upstream (20 kHz × n_channels) input data; at
+    # margin=10 s + 1024 ch that's ~1.7 GB/worker. 16 workers (cpu//2 on
+    # a 32-core box) tipped a 62 GB host into OOM. 4 workers keeps peak
+    # transient around 8 GB while still amortizing the filter cost.
+    return max(1, min((os.cpu_count() or 2) // 2, 4))
 
 
 def load_maxwell_recording(data_path, well_id, rec_name=None):
@@ -11,6 +23,25 @@ def load_maxwell_recording(data_path, well_id, rec_name=None):
     import spikeinterface.extractors as se
 
     return se.read_maxwell(str(data_path), stream_id=str(well_id), rec_name=rec_name)
+
+
+@functools.lru_cache(maxsize=1)
+def _bandpass_accepts_ignore_low_freq_error() -> bool:
+    # Older SI 0.103.x builds don't declare `ignore_low_freq_error`; the kwarg
+    # then falls through `**filter_kwargs` and crashes inside FilterRecording.
+    # Those builds also lack the highpass_check, so omitting it is a no-op.
+    import spikeinterface.preprocessing as spre
+
+    return "ignore_low_freq_error" in inspect.signature(spre.bandpass_filter).parameters
+
+
+def safe_bandpass_filter(recording, **kwargs):
+    """`spre.bandpass_filter` that drops `ignore_low_freq_error` on older SI."""
+    import spikeinterface.preprocessing as spre
+
+    if "ignore_low_freq_error" in kwargs and not _bandpass_accepts_ignore_low_freq_error():
+        kwargs.pop("ignore_low_freq_error")
+    return spre.bandpass_filter(recording, **kwargs)
 
 
 def prepare_recordings(
@@ -55,7 +86,7 @@ def prepare_recordings(
             dtype="float32",
         )
 
-    lfp = spre.bandpass_filter(
+    lfp = safe_bandpass_filter(
         lfp_source,
         freq_min=lfp_low_hz,
         freq_max=lfp_high_hz,
@@ -81,7 +112,7 @@ def materialize_lfp(
     lfp_recording,
     cache_dir,
     *,
-    save_n_jobs: int = 1,
+    save_n_jobs: int | None = None,
     save_chunk_duration: str = "10s",
     progress: bool = True,
 ):
@@ -91,10 +122,16 @@ def materialize_lfp(
     preprocessing chain, so get_traces() calls avoid re-running the
     bandpass filter and common-reference median on every window.
 
-    save_n_jobs and save_chunk_duration default to a conservative
-    sequential-with-small-chunks setting so the materialization step does
-    not itself OOM under the filter margin × parallel-chunks multiplier.
+    ``save_n_jobs`` defaults to ``min(cpu_count()//2, 4)`` — parallel
+    enough to amortize the bandpass+CMR cost, conservative enough to avoid
+    the multiplicative memory blowup that comes from each worker holding
+    the filter-margin's worth of upstream 20 kHz data. ``save_chunk_duration``
+    defaults to ``"10s"`` so the 10 s filter margin only doubles the
+    per-chunk input read (instead of the 21× amplification a 1 s chunk
+    would impose on top of the 20× resample upstream).
     """
+    if save_n_jobs is None:
+        save_n_jobs = _default_save_n_jobs()
     cache_dir = Path(cache_dir)
     if cache_dir.exists():
         shutil.rmtree(cache_dir)

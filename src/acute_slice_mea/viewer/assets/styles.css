@@ -518,6 +518,23 @@ button { font-family: inherit; }
   font-size: 10.5px;
   color: var(--ink-3);
 }
+.chgrid-id-entry {
+  margin-top: 6px;
+  width: 100%;
+  padding: 5px 8px;
+  background: var(--paper-2);
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  color: var(--ink);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  box-sizing: border-box;
+}
+.chgrid-id-entry:focus {
+  outline: none;
+  border-color: var(--ink-3);
+  background: white;
+}
 
 /* Notes */
 .notes {

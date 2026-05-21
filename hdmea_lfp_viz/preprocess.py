@@ -96,8 +96,10 @@ def build_lfp_preprocessing(
     """Build the requested lazy LFP preprocessing chain."""
     import spikeinterface.preprocessing as spre
 
+    from acute_slice_mea.recording import safe_bandpass_filter
+
     notch_frequencies = normalize_notch_frequencies(notch_frequencies)
-    rec = spre.bandpass_filter(
+    rec = safe_bandpass_filter(
         recording,
         freq_min=0.5,
         freq_max=300.0,

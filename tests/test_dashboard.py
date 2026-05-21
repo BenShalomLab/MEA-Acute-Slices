@@ -68,13 +68,17 @@ def test_export_dashboard_data_writes_lazy_loaded_trace_files(tmp_path):
     manifest_path = Path(manifest["data_manifest"])
     assert manifest_path.exists()
     loaded = json.loads(manifest_path.read_text())
-    assert loaded["signals"] == ["raw", "lfp", "spike"]
+    # Default export is LFP-only: this codebase analyses LFP and the trace
+    # viewer never loads raw/spike. Raw/spike dirs must not be written.
+    assert loaded["signals"] == ["lfp"]
+    assert not (tmp_path / "dashboard" / "data" / "traces" / "raw").exists()
+    assert not (tmp_path / "dashboard" / "data" / "traces" / "spike").exists()
     assert loaded["electrodes"][0]["electrode_id"] == 10
 
     # The per-electrode metadata JSON now points at a sibling .npz that holds
     # the float32 time_sec + value arrays at the LFP's full resolution. The
     # JSON keeps the descriptive fields (electrode_id, channel_id, fs, …).
-    meta_path = tmp_path / "dashboard" / "data" / "traces" / "raw" / "10.json"
+    meta_path = tmp_path / "dashboard" / "data" / "traces" / "lfp" / "10.json"
     payload = json.loads(meta_path.read_text())
     assert payload["electrode_id"] == 10
     assert payload["channel_id"] == "a"

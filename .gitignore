@@ -1,4 +1,5 @@
 *.log
+notebooks/lfp_cache/
 
 # Python caches and build artifacts
 __pycache__/

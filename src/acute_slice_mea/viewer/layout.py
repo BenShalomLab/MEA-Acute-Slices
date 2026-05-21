@@ -657,6 +657,13 @@ def _channel_picker() -> html.Div:
                 "Box- or lasso-select electrodes on the chip. Scroll to zoom.",
                 className="chgrid-hint",
             ),
+            dcc.Input(
+                id="electrode-id-entry",
+                type="text",
+                debounce=True,
+                placeholder="IDs / ranges, e.g. 500-520, 550, 600-610  (Enter to apply)",
+                className="chgrid-id-entry",
+            ),
         ],
     )
 

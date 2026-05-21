@@ -47,8 +47,12 @@ PHASES = [
     ("band_power", 0.45),
     ("spectrum", 0.62),
     ("trace_preview", 0.72),
-    ("bursts", 0.85),
-    ("saving", 0.98),
+    ("bursts", 0.83),
+    # The single "saving" stage was split into three sub-stages so the bar
+    # moves through the long export_dashboard_data step instead of freezing.
+    ("saving_cache", 0.86),
+    ("saving_dashboard", 0.92),
+    ("saving_manifest", 0.99),
     ("done", 1.0),
 ]
 
@@ -257,7 +261,7 @@ def run(job_dir: Path) -> int:
 
             run_analysis(config, progress_callback=_on_pipeline_stage)
 
-            _phase(job_dir, "saving", PHASES[6][1])
+            _phase(job_dir, "saving_manifest", 0.99)
             write_cache_meta(output_dir, params=params, hash_=spec.get("hash", ""))
             _finalize_success(job_dir)
             return 0

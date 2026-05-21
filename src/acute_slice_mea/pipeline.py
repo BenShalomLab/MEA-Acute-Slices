@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 import json
 import logging
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -87,7 +88,9 @@ class AnalysisConfig:
     cache_lfp_to_disk: bool = True
     lfp_cache_dir: str | None = None
     keep_lfp_cache: bool = False
-    lfp_save_n_jobs: int = 1
+    lfp_save_n_jobs: int = field(
+        default_factory=lambda: max(1, min((os.cpu_count() or 2) // 2, 4))
+    )
     lfp_save_chunk_duration: str = "10s"
     progress: bool = True
     verbose: bool = False
@@ -242,7 +245,7 @@ def run_analysis(config: AnalysisConfig, progress_callback=None) -> dict:
         _log_verbose(config, "Building probe geometry")
         probe_geometry = build_probe_geometry(electrodes)
 
-    _notify("saving", 0.95)
+    _notify("saving_cache", 0.86)
     elapsed_sec = perf_counter() - started
     summary = {
         **asdict(config),
@@ -281,6 +284,15 @@ def run_analysis(config: AnalysisConfig, progress_callback=None) -> dict:
     manifest["files"]["figures"] = figure_paths
     if config.export_dashboard_data:
         _log_verbose(config, "Exporting dashboard data")
+        # Interpolate the export's internal progress (0..1) across the
+        # saving_dashboard band (0.86 -> 0.99) so the bar moves smoothly
+        # while electrode .npz files stream to disk.
+        dashboard_band = (0.86, 0.99)
+
+        def _dashboard_progress(fraction: float) -> None:
+            lo, hi = dashboard_band
+            _notify("saving_dashboard", lo + (hi - lo) * max(0.0, min(1.0, fraction)))
+
         manifest["files"]["dashboard"] = export_dashboard_data(
             output_dir / "dashboard",
             recordings=recordings,
@@ -288,7 +300,9 @@ def run_analysis(config: AnalysisConfig, progress_callback=None) -> dict:
             band_power=band_power,
             summary=summary,
             max_points_per_electrode=config.dashboard_max_points_per_electrode,
+            progress_callback=_dashboard_progress,
         )
+    _notify("saving_manifest", 0.99)
     _log_verbose(config, "Writing manifest")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     if lfp_cache_dir is not None and not config.keep_lfp_cache:
