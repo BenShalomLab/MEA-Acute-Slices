@@ -30,6 +30,8 @@ from acute_slice_mea.viewer.layout import PLATE_COLS, PLATE_ROWS
 DEFAULT_SELECTION_SIZE = 6
 TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
+_SELECTED_RING_COLOR = "#1a1a1a"
+_SELECTED_RING_WIDTH = 2
 
 
 @lru_cache(maxsize=16)
@@ -221,8 +223,12 @@ def register_all(app, library: LibraryIndex) -> None:
             raise PreventUpdate
         selected_set = set(int(eid) for eid in (selected_channels or []))
         indices = [i for i, eid in enumerate(order) if eid in selected_set]
+        line_widths = [_SELECTED_RING_WIDTH if eid in selected_set else 0 for eid in order]
         patch = Patch()
         patch["data"][0]["selectedpoints"] = indices or None
+        # Patch the ring widths in lockstep with selectedpoints so highlight
+        # and dimming stay coherent without rebuilding the whole figure.
+        patch["data"][0]["marker"]["line"]["width"] = line_widths
         return patch
 
     @app.callback(
@@ -241,19 +247,24 @@ def register_all(app, library: LibraryIndex) -> None:
         order = _routed_eid_order(wd)
         if not order:
             raise PreventUpdate
-        # Plotly.js canonical pattern: identify selected points by zero-based
-        # trace index `pointNumber` (https://plotly.com/javascript/lasso-selection/).
-        # customdata can come back as None on synthetic selectedData events
-        # fired during figure rebuilds, which silently dropped selections in
-        # the previous implementation.
+        # Identify hits by `customdata` (the electrode_id baked into the
+        # trace) so correctness doesn't depend on trace order staying in lockstep
+        # with `_routed_eid_order`. Fall back to `pointNumber → order[idx]` for
+        # synthetic selectedData events fired during figure rebuilds where
+        # customdata can come back as None.
         chosen: list[int] = []
         for point in selected_data["points"]:
-            idx = point.get("pointNumber")
-            if idx is None:
-                idx = point.get("pointIndex")
-            if idx is None or idx < 0 or idx >= len(order):
+            if point.get("curveNumber", 0) != 0:
                 continue
-            chosen.append(order[idx])
+            eid = point.get("customdata")
+            if eid is None:
+                idx = point.get("pointNumber")
+                if idx is None:
+                    idx = point.get("pointIndex")
+                if idx is None or idx < 0 or idx >= len(order):
+                    continue
+                eid = order[idx]
+            chosen.append(int(eid))
         if not chosen:
             # Empty selectedData (deselect / lasso over empty space / synthetic
             # event on figure replacement) must not wipe the current selection —
@@ -282,12 +293,17 @@ def register_all(app, library: LibraryIndex) -> None:
         if not order:
             raise PreventUpdate
         point = click_data["points"][0]
-        idx = point.get("pointNumber")
-        if idx is None:
-            idx = point.get("pointIndex")
-        if idx is None or idx < 0 or idx >= len(order):
+        if point.get("curveNumber", 0) != 0:
             raise PreventUpdate
-        eid = order[idx]
+        eid = point.get("customdata")
+        if eid is None:
+            idx = point.get("pointNumber")
+            if idx is None:
+                idx = point.get("pointIndex")
+            if idx is None or idx < 0 or idx >= len(order):
+                raise PreventUpdate
+            eid = order[idx]
+        eid = int(eid)
         current_set = set(int(c) for c in (current or []))
         if eid in current_set:
             current_set.discard(eid)
@@ -577,14 +593,14 @@ def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
 
 def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -> go.Figure:
     fig = go.Figure()
-    # Full chip grid as a faint backdrop. We draw it as a single shape rather
-    # than 26k markers to keep render cost low.
+    # Chip border. Tightened to the canonical 0..WIDTH × 0..HEIGHT extent so it
+    # reads as a real boundary; layout ranges leave a small inset around it.
     fig.add_shape(
         type="rect",
-        x0=-MAXWELL_PITCH_UM, x1=WIDTH_UM,
-        y0=-MAXWELL_PITCH_UM, y1=HEIGHT_UM,
-        line=dict(color="#cfcabc", width=1),
-        fillcolor="rgba(243, 241, 234, 0.4)",
+        x0=0, x1=WIDTH_UM,
+        y0=0, y1=HEIGHT_UM,
+        line=dict(color="#8a8472", width=1.25),
+        fillcolor="rgba(243, 241, 234, 0.45)",
         layer="below",
     )
 
@@ -595,22 +611,57 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
     routed = _routed_entries(wd)
 
     selected_set = set(int(eid) for eid in selected_channels)
-    rms_values = [r.get("rms_uv") for r in routed if r.get("rms_uv") is not None]
-    rms_max = max(rms_values) if rms_values else 1.0
 
-    xs, ys, custom, colors, sizes = [], [], [], [], []
+    xs, ys, custom, rms_values = [], [], [], []
     for entry in routed:
         eid = int(entry["electrode_id"])
         xs.append(entry["x_um"])
         ys.append(entry["y_um"])
         custom.append(eid)
         rms = entry.get("rms_uv")
-        intensity = 0.0 if rms is None or rms_max == 0 else min(1.0, float(rms) / rms_max)
-        colors.append(_interp_color(intensity))
-        # Lasso needs markers big enough for Plotly's hit-test to find them
-        # under the drawn path. 5–8 px is the working range; smaller markers
-        # made box/lasso silently fail in WebGL.
-        sizes.append(5 + 3 * intensity)
+        rms_values.append(0.0 if rms is None else float(rms))
+
+    nonzero_rms = [v for v in rms_values if v > 0]
+    rms_max = max(nonzero_rms) if nonzero_rms else 0.0
+    has_rms = rms_max > 0
+
+    # Per-point line widths draw the selection ring. selected.marker doesn't
+    # support a `line` property in Plotly, so we encode the ring at the base
+    # marker level and patch the widths array on selection change.
+    line_widths = [_SELECTED_RING_WIDTH if eid in selected_set else 0 for eid in custom]
+    marker_kwargs: dict = dict(
+        size=7,
+        line=dict(color=_SELECTED_RING_COLOR, width=line_widths),
+    )
+    if has_rms:
+        marker_kwargs.update(
+            color=rms_values,
+            cmin=0,
+            cmax=rms_max,
+            colorscale="Viridis",
+            showscale=True,
+            colorbar=dict(
+                orientation="h",
+                x=0.5, xanchor="center",
+                y=1.04, yanchor="bottom",
+                thickness=8,
+                len=0.55,
+                outlinewidth=0,
+                tickfont=dict(family="IBM Plex Sans", size=10, color="#5a5648"),
+                title=dict(
+                    text="RMS (µV)",
+                    side="top",
+                    font=dict(family="IBM Plex Sans", size=11, color="#5a5648"),
+                ),
+            ),
+        )
+        hovertemplate = (
+            "E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm"
+            "<br>RMS=%{marker.color:.1f} µV<extra></extra>"
+        )
+    else:
+        marker_kwargs.update(color="#cfcabc")
+        hovertemplate = "E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>"
 
     # SVG Scatter (not Scattergl) — at ~hundreds of routed electrodes the
     # SVG cost is fine, and SVG hit-testing for lasso/box select is reliable
@@ -622,14 +673,14 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             customdata=custom,
             mode="markers",
             name="routed",
-            marker=dict(
-                size=sizes,
-                color=colors,
-                line=dict(width=0),
-            ),
-            hovertemplate="E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>",
+            marker=marker_kwargs,
+            hovertemplate=hovertemplate,
             selectedpoints=[i for i, eid in enumerate(custom) if eid in selected_set] or None,
-            selected=dict(marker=dict(color=TRACE_COLOR, size=8, opacity=1.0)),
+            # Selection highlight: the ring lives on the base marker via
+            # per-point line.width. `selected.marker` only drives opacity
+            # (kept full) and is bumped together with the ring above. Unselected
+            # dots dim so the picked subset reads at a glance.
+            selected=dict(marker=dict(opacity=1.0)),
             unselected=dict(marker=dict(opacity=0.55)),
         )
     )
@@ -644,11 +695,13 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
 
 def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict:
     return dict(
-        margin=dict(l=8, r=8, t=8, b=8),
+        # Top margin reserves space for the horizontal RMS colorbar above the
+        # chip border.
+        margin=dict(l=8, r=8, t=44, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#f3f1ea",
         xaxis=dict(
-            range=[-MAXWELL_PITCH_UM, WIDTH_UM],
+            range=[-30, WIDTH_UM + 30],
             showgrid=False,
             zeroline=False,
             visible=False,
@@ -657,7 +710,7 @@ def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict
             scaleratio=1,
         ),
         yaxis=dict(
-            range=[HEIGHT_UM, -MAXWELL_PITCH_UM],  # invert so chip "row 0" is at top
+            range=[HEIGHT_UM + 30, -30],  # invert so chip "row 0" is at top
             showgrid=False,
             zeroline=False,
             visible=False,
