@@ -15,9 +15,6 @@ from dash import dcc, html
 
 from acute_slice_mea.library import LibraryIndex, RecordingEntry
 
-PRESET_WINDOW_SECONDS = [1, 2, 5, 10, 30]
-DEFAULT_WINDOW_SECONDS = 5
-
 # 4 x 6 MaxWell 24-well plate. We render the *fixed* layout; missing wells
 # are styled differently based on whether they appear in the recording.
 PLATE_ROWS = ["A", "B", "C", "D"]
@@ -49,7 +46,6 @@ def build_layout(library: LibraryIndex) -> html.Div:
             dcc.Store(id="selected-recording-id"),
             dcc.Store(id="selected-well-id"),
             dcc.Store(id="selected-channels", data=[]),
-            dcc.Store(id="time-window", data=[0.0, float(DEFAULT_WINDOW_SECONDS)]),
             dcc.Store(id="gain", data=1.0),
             # Bumped whenever the active (recording, well) changes so downstream
             # callbacks can flush their per-well caches.
@@ -216,14 +212,6 @@ def _center_column() -> html.Div:
                     style={"height": "100%", "minHeight": "320px"},
                 ),
             ),
-            html.Div(
-                className="scrubber",
-                children=dcc.Graph(
-                    id="scrubber-graph",
-                    config={"displaylogo": False, "displayModeBar": False, "staticPlot": False},
-                    style={"height": "44px"},
-                ),
-            ),
             html.Div(id="meta-strip", className="meta-strip"),
         ],
     )
@@ -239,27 +227,6 @@ def _control_bar() -> html.Div:
                     html.Span("Bandpass", className="ctrl-label"),
                     html.Span("0.5 – 300 Hz", className="ctrl-readout ctrl-readout-locked"),
                     html.Span("LFP standard", className="ctrl-hint"),
-                ],
-            ),
-            html.Div(className="ctrl-divider"),
-            html.Div(
-                className="ctrl-group",
-                children=[
-                    html.Span("Window", className="ctrl-label"),
-                    html.Div(
-                        className="seg",
-                        id="window-presets",
-                        children=[
-                            html.Button(
-                                f"{s}s",
-                                id={"type": "window-preset", "seconds": s},
-                                className="seg-btn",
-                                n_clicks=0,
-                            )
-                            for s in PRESET_WINDOW_SECONDS
-                        ],
-                    ),
-                    html.Span(id="window-readout", className="ctrl-readout"),
                 ],
             ),
             html.Div(className="ctrl-divider"),

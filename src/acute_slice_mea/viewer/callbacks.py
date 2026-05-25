@@ -3,6 +3,10 @@
 The viewer is a thin client over the cache; all heavy data lives in
 ``WellData`` instances cached per ``cache_dir`` path. Callbacks read those
 objects and emit Plotly figures or store updates.
+
+Trace figures are wrapped in ``plotly_resampler.FigureResampler`` so that
+zoom/pan dynamically re-aggregates full-resolution data using MinMaxLTTB
+instead of naive subsampling.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import numpy as np
 import plotly.graph_objects as go
 from dash import ALL, Input, Output, Patch, State, callback_context, ctx, html, no_update
 from dash.exceptions import PreventUpdate
+from plotly_resampler import FigureResampler
 
 from acute_slice_mea.library import LibraryIndex, RecordingEntry, WellEntry
 from acute_slice_mea.probe_geometry import (
@@ -32,6 +37,8 @@ TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
 _SELECTED_RING_WIDTH = 2
+
+_current_resampler: FigureResampler | None = None
 
 
 @lru_cache(maxsize=16)
@@ -167,11 +174,10 @@ def register_all(app, library: LibraryIndex) -> None:
             raise PreventUpdate
         return triggered["well_id"]
 
-    # -- well change → bump version, reset window, seed channels ------
+    # -- well change → bump version, seed channels ----------------------
 
     @app.callback(
         Output("well-version", "data"),
-        Output("time-window", "data"),
         Output("selected-channels", "data"),
         Input("selected-recording-id", "data"),
         Input("selected-well-id", "data"),
@@ -181,12 +187,9 @@ def register_all(app, library: LibraryIndex) -> None:
     def on_well_change(recording_id, well_id, version):
         wd = _well_data(recording_id, well_id)
         if wd is None:
-            return (version or 0) + 1, [0.0, 5.0], []
-        duration = wd.duration_sec or 60.0
-        window = [0.0, float(min(5.0, duration))]
-        # Seed with the top-RMS routed electrodes so the viewer is never empty.
+            return (version or 0) + 1, []
         seed = _top_rms_electrodes(wd, DEFAULT_SELECTION_SIZE)
-        return (version or 0) + 1, window, seed
+        return (version or 0) + 1, seed
 
     # -- probe map ----------------------------------------------------
 
@@ -364,25 +367,7 @@ def register_all(app, library: LibraryIndex) -> None:
             return ids[::8] if ids else []
         raise PreventUpdate
 
-    # -- window preset / gain controls -------------------------------
-
-    @app.callback(
-        Output("time-window", "data", allow_duplicate=True),
-        Input({"type": "window-preset", "seconds": ALL}, "n_clicks"),
-        State("time-window", "data"),
-        State("selected-recording-id", "data"),
-        State("selected-well-id", "data"),
-        prevent_initial_call=True,
-    )
-    def on_window_preset(_clicks, window, recording_id, well_id):
-        triggered = ctx.triggered_id
-        if not isinstance(triggered, dict):
-            raise PreventUpdate
-        span = float(triggered["seconds"])
-        wd = _well_data(recording_id, well_id)
-        duration = wd.duration_sec if wd else 60.0
-        center = (window[0] + window[1]) / 2 if window else span / 2
-        return _clamp_window(center - span / 2, center + span / 2, duration)
+    # -- gain controls -------------------------------------------------
 
     @app.callback(
         Output("gain", "data"),
@@ -399,66 +384,49 @@ def register_all(app, library: LibraryIndex) -> None:
             return max(0.25, gain / 1.4)
         raise PreventUpdate
 
-    # -- scrubber: rangeslider drag → window store --------------------
-
-    @app.callback(
-        Output("time-window", "data", allow_duplicate=True),
-        Input("scrubber-graph", "relayoutData"),
-        State("time-window", "data"),
-        State("selected-recording-id", "data"),
-        State("selected-well-id", "data"),
-        prevent_initial_call=True,
-    )
-    def on_scrubber_drag(relayout_data, current_window, recording_id, well_id):
-        if not relayout_data:
-            raise PreventUpdate
-        a = relayout_data.get("xaxis.range[0]")
-        b = relayout_data.get("xaxis.range[1]")
-        if a is None and "xaxis.range" in relayout_data:
-            a, b = relayout_data["xaxis.range"]
-        if a is None or b is None:
-            raise PreventUpdate
-        wd = _well_data(recording_id, well_id)
-        duration = wd.duration_sec if wd else 60.0
-        return _clamp_window(float(a), float(b), duration)
-
     # -- traces figure ------------------------------------------------
 
     @app.callback(
         Output("traces-graph", "figure"),
-        Output("scrubber-graph", "figure"),
         Output("status-text", "children"),
         Output("trace-count-readout", "children"),
-        Output("window-readout", "children"),
         Output("gain-readout", "children"),
         Output("electrode-count-readout", "children"),
         Input("well-version", "data"),
         Input("selected-channels", "data"),
-        Input("time-window", "data"),
         Input("gain", "data"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
     )
-    def render_traces(_version, selected_channels, window, gain, recording_id, well_id):
+    def render_traces(_version, selected_channels, gain, recording_id, well_id):
         wd = _well_data(recording_id, well_id)
         selected_channels = selected_channels or []
-        window = window or [0.0, 5.0]
         gain = float(gain or 1.0)
 
-        traces_fig = _build_traces_figure(wd, selected_channels, window, gain)
-        scrubber_fig = _build_scrubber_figure(wd, window)
+        traces_fig = _build_traces_figure(wd, selected_channels, gain)
 
         n_traces = len(selected_channels)
         n_routed = len(wd.routed_electrode_ids()) if wd is not None else 0
         return (
             traces_fig,
-            scrubber_fig,
             f"{n_traces} {'trace' if n_traces == 1 else 'traces'} on screen",
             f"{n_traces} {'trace' if n_traces == 1 else 'traces'}",
-            f"{_fmt_time(window[0])} → {_fmt_time(window[1])}",
             f"{gain:.2f}×",
             f"{n_traces} / {n_routed} routed selected",
         )
+
+    # -- plotly-resampler: dynamic re-aggregation on zoom/pan ---------
+
+    @app.callback(
+        Output("traces-graph", "figure", allow_duplicate=True),
+        Input("traces-graph", "relayoutData"),
+        prevent_initial_call=True,
+    )
+    def resample_traces(relayoutdata):
+        global _current_resampler
+        if _current_resampler is None:
+            raise PreventUpdate
+        return _current_resampler.construct_update_data_patch(relayoutdata)
 
     # -- crumbs + meta strip + notes ---------------------------------
 
@@ -734,11 +702,13 @@ def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict
 def _build_traces_figure(
     wd: WellData | None,
     selected_channels: list[int],
-    window: list[float],
     gain: float,
 ) -> go.Figure:
-    fig = go.Figure()
+    global _current_resampler
+
     if wd is None or not selected_channels:
+        _current_resampler = None
+        fig = go.Figure()
         fig.update_layout(
             margin=dict(l=20, r=20, t=10, b=30),
             paper_bgcolor="rgba(0,0,0,0)",
@@ -758,9 +728,10 @@ def _build_traces_figure(
         )
         return fig
 
-    t0, t1 = float(window[0]), float(window[1])
-    payloads = wd.traces_for(selected_channels, signal="lfp", t0=t0, t1=t1)
+    payloads = wd.traces_for(selected_channels, signal="lfp", decimate=False)
     if not payloads:
+        _current_resampler = None
+        fig = go.Figure()
         fig.update_layout(
             annotations=[
                 dict(
@@ -772,31 +743,34 @@ def _build_traces_figure(
         )
         return fig
 
-    # Stack traces vertically with constant vertical offset.
-    spacing = 250.0 / max(gain, 0.1)  # microvolts between rows
+    fig = FigureResampler(
+        go.Figure(),
+        default_n_shown_samples=1000,
+        resampled_trace_prefix_suffix=("", ""),
+        show_mean_aggregation_size=False,
+    )
+
+    spacing = 250.0 / max(gain, 0.1)
     for idx, payload in enumerate(payloads):
         offset = -idx * spacing
         fig.add_trace(
             go.Scattergl(
-                x=payload["time_sec"],
-                y=payload["value"] * gain + offset,
                 mode="lines",
                 line=dict(color=TRACE_COLOR, width=1),
                 name=f"E{payload['electrode_id']}",
-                hovertemplate="t=%{x:.3f}s<br>%{text}<extra></extra>",
-                text=[f"E{payload['electrode_id']}"] * len(payload["time_sec"]),
-            )
+            ),
+            hf_x=payload["time_sec"],
+            hf_y=payload["value"] * gain + offset,
         )
 
-    # Burst shading
     for burst in wd.bursts:
-        if burst["t_end_s"] < t0 or burst["t_start_s"] > t1:
-            continue
         fig.add_vrect(
             x0=burst["t_start_s"], x1=burst["t_end_s"],
             fillcolor=BURST_COLOR, line_width=0, layer="below",
         )
 
+    duration = wd.duration_sec or 60.0
+    initial_end = min(5.0, duration)
     y_min = -(len(payloads) - 0.5) * spacing
     y_max = 0.5 * spacing
     label_positions = [-i * spacing for i in range(len(payloads))]
@@ -806,7 +780,7 @@ def _build_traces_figure(
         plot_bgcolor="#faf9f5",
         showlegend=False,
         xaxis=dict(
-            range=[t0, t1],
+            range=[0, initial_end],
             showgrid=True,
             gridcolor="rgba(26, 25, 22, 0.06)",
             zeroline=False,
@@ -823,49 +797,8 @@ def _build_traces_figure(
         ),
         hovermode="closest",
     )
-    return fig
 
-
-def _build_scrubber_figure(wd: WellData | None, window: list[float]) -> go.Figure:
-    fig = go.Figure()
-    duration = (wd.duration_sec if wd else 60.0) or 60.0
-    fig.add_shape(
-        type="rect",
-        x0=0, x1=duration, y0=0, y1=1,
-        fillcolor="#f3f1ea", line_width=0, layer="below",
-    )
-    if wd is not None:
-        for burst in wd.bursts:
-            fig.add_shape(
-                type="line",
-                x0=burst["center_s"], x1=burst["center_s"],
-                y0=0, y1=1,
-                line=dict(color="#c47208", width=1),
-            )
-    # Highlighted current window
-    fig.add_shape(
-        type="rect",
-        x0=window[0], x1=window[1], y0=0, y1=1,
-        fillcolor="rgba(10, 125, 127, 0.18)",
-        line=dict(color="#0a7d7f", width=2),
-    )
-    fig.update_layout(
-        margin=dict(l=12, r=12, t=2, b=4),
-        paper_bgcolor="rgba(0,0,0,0)",
-        plot_bgcolor="rgba(0,0,0,0)",
-        xaxis=dict(
-            range=[0, duration],
-            showgrid=False,
-            zeroline=False,
-            showticklabels=False,
-            rangeslider=dict(visible=False),
-            fixedrange=False,
-        ),
-        yaxis=dict(visible=False, range=[0, 1], fixedrange=True),
-        dragmode="zoom",
-        showlegend=False,
-        height=44,
-    )
+    _current_resampler = fig
     return fig
 
 
@@ -882,23 +815,6 @@ def _top_rms_electrodes(wd: WellData, n: int) -> list[int]:
     ordered = sorted(rms.items(), key=lambda kv: kv[1], reverse=True)
     return [eid for eid, _ in ordered[:n]]
 
-
-def _clamp_window(a: float, b: float, duration: float | None) -> list[float]:
-    duration = float(duration or 60.0)
-    if b <= a:
-        b = a + 0.2
-    span = b - a
-    a = max(0.0, a)
-    b = min(duration, b)
-    if b - a < 0.2:
-        a = max(0.0, duration - 0.2)
-        b = a + 0.2
-    if b - a > duration:
-        a = 0.0
-        b = duration
-    if a + span <= duration and span >= 0.2:
-        b = a + span
-    return [float(a), float(b)]
 
 
 def _fmt_time(seconds: float | None) -> str:

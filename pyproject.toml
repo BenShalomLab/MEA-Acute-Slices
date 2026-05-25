@@ -26,6 +26,7 @@ dependencies = [
     "tqdm",
     "pydantic",
     "dash>=2.18",
+    "plotly-resampler>=0.10",
 ]
 
 [project.scripts]

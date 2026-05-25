@@ -151,12 +151,20 @@ class WellData:
         signal: str = "lfp",
         t0: float | None = None,
         t1: float | None = None,
+        decimate: bool = True,
     ) -> list[dict]:
         """Return raw payloads for the requested electrode traces.
 
         Each payload contains ``time_sec``, ``value``, ``electrode_id``,
         ``channel_id`` and (when ``t0``/``t1`` are given) is already clipped to
         the window. Missing electrode ids are silently skipped.
+
+        Parameters
+        ----------
+        decimate : bool
+            When True (default), the SpikeInterface path decimates to
+            ~_LAZY_TARGET_POINTS.  Set False when plotly-resampler handles
+            aggregation so that full-resolution data is returned.
 
         Source order:
         1. Per-electrode JSON files from the dashboard export (if present).
@@ -173,7 +181,7 @@ class WellData:
 
         if self.raw_path is not None and self.well_id is not None:
             return self._traces_from_recording(
-                eid_list, signal=signal, t0=t0, t1=t1
+                eid_list, signal=signal, t0=t0, t1=t1, decimate=decimate,
             )
         return []
 
@@ -216,6 +224,7 @@ class WellData:
         signal: str,
         t0: float | None,
         t1: float | None,
+        decimate: bool = True,
     ) -> list[dict]:
         if self.raw_path is None or self.well_id is None:
             return []
@@ -249,6 +258,7 @@ class WellData:
             channel_ids=tuple(channel_ids),
             t_start=float(t_lo),
             t_end=float(t_hi),
+            decimate=decimate,
         )
         results: list[dict] = []
         for idx, (eid, cid) in enumerate(zip(kept_eids, channel_ids)):
@@ -294,13 +304,17 @@ def _lazy_lfp_window(
     channel_ids: tuple[str, ...],
     t_start: float,
     t_end: float,
+    decimate: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Read a (decimated) window of LFP/raw/spike traces lazily.
+    """Read a window of LFP/raw/spike traces lazily.
 
     Returns ``(time_sec, values)`` where ``values`` has shape
     ``(n_samples, len(channel_ids))`` in microvolts (or the recording's
     physical units — SpikeInterface returns float32 in chip units after
     bandpass+common-reference).
+
+    When *decimate* is False the full-resolution data is returned so that
+    plotly-resampler can apply MinMaxLTTB aggregation on the client side.
     """
     recordings = _open_prepared_recording(raw_path, well_id, rec_name)
     recording = recordings.get(signal) or recordings["lfp"]
@@ -318,9 +332,10 @@ def _lazy_lfp_window(
     traces = np.asarray(traces, dtype=np.float32)
 
     n_samples = traces.shape[0]
-    # Decimate to ~_LAZY_TARGET_POINTS so plotly stays snappy.
-    step = max(1, n_samples // _LAZY_TARGET_POINTS)
-    if step > 1:
-        traces = traces[::step]
+    step = 1
+    if decimate:
+        step = max(1, n_samples // _LAZY_TARGET_POINTS)
+        if step > 1:
+            traces = traces[::step]
     time_arr = (np.arange(traces.shape[0], dtype=np.float64) * step + start_frame) / fs
     return time_arr, traces
