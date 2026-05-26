@@ -206,10 +206,13 @@ def _center_column() -> html.Div:
             html.Div(
                 id="center-stage",
                 className="center-stage",
-                children=dcc.Graph(
-                    id="traces-graph",
-                    config={"displaylogo": False, "displayModeBar": "hover"},
-                    style={"height": "100%", "minHeight": "320px"},
+                children=dcc.Loading(
+                    dcc.Graph(
+                        id="traces-graph",
+                        config={"displaylogo": False, "displayModeBar": "hover"},
+                        style={"height": "100%", "minHeight": "320px"},
+                    ),
+                    type="circle",
                 ),
             ),
             html.Div(id="meta-strip", className="meta-strip"),
