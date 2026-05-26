@@ -618,20 +618,22 @@ def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
     return sorted(chosen)
 
 
+_PLOT_HEIGHT_PX = 268  # 320px graph - 44 top margin - 8 bottom margin
+_HALF_PITCH = MAXWELL_PITCH_UM / 2.0
+
+
 def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -> go.Figure:
     fig = go.Figure()
-    # Chip border. Tightened to the canonical 0..WIDTH × 0..HEIGHT extent so it
-    # reads as a real boundary; layout ranges leave a small inset around it.
-    fig.add_shape(
-        type="rect",
-        x0=0, x1=WIDTH_UM,
-        y0=0, y1=HEIGHT_UM,
-        line=dict(color="#8a8472", width=1.25),
-        fillcolor="rgba(243, 241, 234, 0.45)",
-        layer="below",
-    )
 
     if wd is None:
+        fig.add_shape(
+            type="rect",
+            x0=0, x1=WIDTH_UM,
+            y0=0, y1=HEIGHT_UM,
+            line=dict(color="#8a8472", width=1.25),
+            fillcolor="rgba(243, 241, 234, 0.45)",
+            layer="below",
+        )
         fig.update_layout(_probe_map_layout(empty=True))
         return fig
 
@@ -648,13 +650,35 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         rms = entry.get("rms_uv")
         rms_values.append(0.0 if rms is None else float(rms))
 
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    bounds = (
+        x_min - _HALF_PITCH,
+        x_max + _HALF_PITCH,
+        y_min - _HALF_PITCH,
+        y_max + _HALF_PITCH,
+    )
+
+    fig.add_shape(
+        type="rect",
+        x0=bounds[0], x1=bounds[1],
+        y0=bounds[2], y1=bounds[3],
+        line=dict(color="#8a8472", width=1.25),
+        fillcolor="rgba(243, 241, 234, 0.45)",
+        layer="below",
+    )
+
+    y_range_um = (bounds[3] - bounds[2]) + 60  # +60 for axis padding
+    px_per_um = _PLOT_HEIGHT_PX / y_range_um
+    marker_size = max(2, min(7, MAXWELL_PITCH_UM * px_per_um * 0.8))
+
     nonzero_rms = [v for v in rms_values if v > 0]
     rms_max = max(nonzero_rms) if nonzero_rms else 0.0
     has_rms = rms_max > 0
 
     line_widths = [_SELECTED_RING_WIDTH if eid in selected_set else 0 for eid in custom]
     marker_kwargs: dict = dict(
-        size=7,
+        size=marker_size,
         line=dict(color=_SELECTED_RING_COLOR, width=line_widths),
     )
     if has_rms:
@@ -714,19 +738,26 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
     # in-progress lasso strokes alive across the figure rebuilds triggered by
     # `selected-channels` updates.
     revision = f"{wd.cache_dir}" if wd is not None else "empty"
-    fig.update_layout(_probe_map_layout(uirevision=revision))
+    fig.update_layout(_probe_map_layout(uirevision=revision, bounds=bounds))
     return fig
 
 
-def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict:
+def _probe_map_layout(
+    *,
+    empty: bool = False,
+    uirevision: str = "empty",
+    bounds: tuple[float, float, float, float] | None = None,
+) -> dict:
+    if bounds is not None:
+        x_lo, x_hi, y_lo, y_hi = bounds
+    else:
+        x_lo, x_hi, y_lo, y_hi = 0, WIDTH_UM, 0, HEIGHT_UM
     return dict(
-        # Top margin reserves space for the horizontal RMS colorbar above the
-        # chip border.
         margin=dict(l=8, r=8, t=44, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="#f3f1ea",
         xaxis=dict(
-            range=[-30, WIDTH_UM + 30],
+            range=[x_lo - 30, x_hi + 30],
             showgrid=False,
             zeroline=False,
             visible=False,
@@ -735,7 +766,7 @@ def _probe_map_layout(*, empty: bool = False, uirevision: str = "empty") -> dict
             scaleratio=1,
         ),
         yaxis=dict(
-            range=[HEIGHT_UM + 30, -30],  # invert so chip "row 0" is at top
+            range=[y_hi + 30, y_lo - 30],  # invert so chip "row 0" is at top
             showgrid=False,
             zeroline=False,
             visible=False,
