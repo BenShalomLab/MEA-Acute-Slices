@@ -435,13 +435,18 @@ def register_all(app, library: LibraryIndex) -> None:
         Input("gain", "data"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
+        State("traces-graph", "figure"),
     )
-    def render_traces(_version, selected_channels, gain, recording_id, well_id):
+    def render_traces(_version, selected_channels, gain, recording_id, well_id, current_fig):
         wd = _well_data(recording_id, well_id)
         selected_channels = selected_channels or []
         gain = float(gain or 1.0)
 
-        traces_fig = _build_traces_figure(wd, selected_channels, gain)
+        prev_range = None
+        if current_fig and ctx.triggered_id == "gain":
+            prev_range = current_fig.get("layout", {}).get("xaxis", {}).get("range")
+
+        traces_fig = _build_traces_figure(wd, selected_channels, gain, xaxis_range=prev_range)
 
         n_traces = len(selected_channels)
         n_routed = len(wd.routed_electrode_ids()) if wd is not None else 0
@@ -741,6 +746,7 @@ def _build_traces_figure(
     wd: WellData | None,
     selected_channels: list[int],
     gain: float,
+    xaxis_range: list[float] | None = None,
 ) -> go.Figure:
     global _current_resampler
 
@@ -815,7 +821,10 @@ def _build_traces_figure(
         )
 
     duration = wd.duration_sec or 60.0
-    initial_end = min(5.0, duration)
+    if xaxis_range:
+        x_range = xaxis_range
+    else:
+        x_range = [0, min(5.0, duration)]
     y_min = -(len(payloads) - 0.5) * spacing
     y_max = 0.5 * spacing
     label_positions = [-i * spacing for i in range(len(payloads))]
@@ -825,8 +834,8 @@ def _build_traces_figure(
         plot_bgcolor="#faf9f5",
         showlegend=False,
         xaxis=dict(
-            range=[0, initial_end],
-            rangeslider=dict(visible=True, thickness=0.08),
+            range=x_range,
+            rangeslider=dict(visible=True, thickness=0.08, range=[0, duration]),
             showgrid=True,
             gridcolor="rgba(26, 25, 22, 0.06)",
             zeroline=False,
