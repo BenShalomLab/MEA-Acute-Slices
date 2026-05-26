@@ -288,13 +288,15 @@ def _read_trace_json_cached(path: str) -> dict:
 @lru_cache(maxsize=4)
 def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     """Cache the (signed → bandpass → common-ref) chain per well."""
+    import spikeinterface as si
     from acute_slice_mea.recording import load_maxwell_recording, prepare_recordings
 
+    si.set_global_job_kwargs(chunk_duration="60s")
     raw = load_maxwell_recording(raw_path, well_id, rec_name=rec_name)
     return prepare_recordings(raw)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=8)
 def _lazy_lfp_window(
     *,
     raw_path: str,
@@ -331,11 +333,20 @@ def _lazy_lfp_window(
     )
     traces = np.asarray(traces, dtype=np.float32)
 
+    _MAX_SAMPLES = 500_000
     n_samples = traces.shape[0]
     step = 1
     if decimate:
         step = max(1, n_samples // _LAZY_TARGET_POINTS)
-        if step > 1:
-            traces = traces[::step]
+    elif n_samples > _MAX_SAMPLES:
+        step = max(1, n_samples // _MAX_SAMPLES)
+    if step > 1:
+        traces = traces[::step]
     time_arr = (np.arange(traces.shape[0], dtype=np.float64) * step + start_frame) / fs
     return time_arr, traces
+
+
+def clear_all_caches() -> None:
+    _read_trace_json_cached.cache_clear()
+    _lazy_lfp_window.cache_clear()
+    _open_prepared_recording.cache_clear()

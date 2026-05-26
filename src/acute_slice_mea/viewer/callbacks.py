@@ -728,7 +728,7 @@ def _build_traces_figure(
         )
         return fig
 
-    payloads = wd.traces_for(selected_channels, signal="lfp", decimate=False)
+    payloads = wd.traces_for(selected_channels, signal="lfp")
     if not payloads:
         _current_resampler = None
         fig = go.Figure()
