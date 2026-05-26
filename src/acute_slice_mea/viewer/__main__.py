@@ -3,15 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import logging
 from pathlib import Path
 
 from acute_slice_mea.viewer.app import create_app
 
 
 def main(argv: list[str] | None = None) -> int:
-    logging.basicConfig(level=logging.WARNING, format="%(name)s | %(message)s")
-    logging.getLogger("mem_debug").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(
         prog="acute-slice-viewer",
         description="Interactive LFP trace viewer for cached Acute Slice MEA recordings.",
