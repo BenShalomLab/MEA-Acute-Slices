@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from acute_slice_mea.viewer.callbacks import _parse_electrode_id_input
+from acute_slice_mea.viewer.callbacks import _parse_electrode_id_input, _rms_clip_range
 
 
 VALID = set(range(1, 1001))  # routed-electrode set used in tests
@@ -62,3 +62,32 @@ class TestParseElectrodeIdInput:
         # All inputs outside the routed set → empty result (callback uses this
         # to PreventUpdate rather than wiping the current selection).
         assert _parse_electrode_id_input("9999, 8888-8890", VALID) == []
+
+
+class TestRmsClipRange:
+    def test_normal_range(self):
+        values = list(range(1, 101))
+        lo, hi = _rms_clip_range(values)
+        assert lo == pytest.approx(2.98, abs=0.5)
+        assert hi == pytest.approx(98.02, abs=0.5)
+
+    def test_zeros_filtered(self):
+        values = [0.0] * 50 + list(range(1, 51))
+        lo, hi = _rms_clip_range(values)
+        assert lo > 0
+
+    def test_few_values_fallback(self):
+        values = [1.0, 2.0, 100.0]
+        lo, hi = _rms_clip_range(values)
+        assert lo == 0.0
+        assert hi == 100.0
+
+    def test_all_zeros(self):
+        lo, hi = _rms_clip_range([0.0, 0.0, 0.0])
+        assert lo == 0.0
+        assert hi == 0.0
+
+    def test_uniform_values(self):
+        values = [5.0] * 20
+        lo, hi = _rms_clip_range(values)
+        assert hi > lo

@@ -357,6 +357,12 @@ def _channel_picker() -> html.Div:
                 },
                 style={"height": "320px"},
             ),
+            dcc.Graph(
+                id="rms-histogram",
+                className="chgrid-histogram",
+                config={"displayModeBar": False, "staticPlot": True},
+                style={"height": "64px"},
+            ),
             html.Div(
                 "Box- or lasso-select on the chip · click to toggle · scroll to zoom.",
                 className="chgrid-hint",

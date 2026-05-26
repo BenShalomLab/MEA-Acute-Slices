@@ -496,6 +496,11 @@ button { font-family: inherit; }
   border-radius: 8px;
   padding: 4px;
 }
+.chgrid-histogram {
+  background: transparent;
+  margin-top: -2px;
+  padding: 0 4px;
+}
 .chgrid-hint {
   margin-top: 6px;
   font-family: var(--font-mono);

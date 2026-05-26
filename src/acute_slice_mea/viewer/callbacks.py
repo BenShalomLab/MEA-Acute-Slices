@@ -40,6 +40,7 @@ TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
 _SELECTED_RING_WIDTH = 2
+_OVER_COLOR = "#b94668"
 
 _current_resampler: FigureResampler | None = None
 
@@ -221,6 +222,21 @@ def register_all(app, library: LibraryIndex) -> None:
     def render_probe_map(_version, selected_channels, recording_id, well_id):
         wd = _well_data(recording_id, well_id)
         return _build_probe_map_figure(wd, selected_channels or [])
+
+    @app.callback(
+        Output("rms-histogram", "figure"),
+        Input("well-version", "data"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+    )
+    def render_rms_histogram(_version, recording_id, well_id):
+        wd = _well_data(recording_id, well_id)
+        if wd is None:
+            return go.Figure()
+        routed = _routed_entries(wd)
+        rms_values = [float(e.get("rms_uv") or 0) for e in routed]
+        clip_lo, clip_hi = _rms_clip_range(rms_values)
+        return _build_rms_histogram_figure(rms_values, clip_lo, clip_hi)
 
     @app.callback(
         Output("probe-map", "figure", allow_duplicate=True),
@@ -636,20 +652,18 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
     rms_max = max(nonzero_rms) if nonzero_rms else 0.0
     has_rms = rms_max > 0
 
-    # Per-point line widths draw the selection ring. selected.marker doesn't
-    # support a `line` property in Plotly, so we encode the ring at the base
-    # marker level and patch the widths array on selection change.
     line_widths = [_SELECTED_RING_WIDTH if eid in selected_set else 0 for eid in custom]
     marker_kwargs: dict = dict(
         size=7,
         line=dict(color=_SELECTED_RING_COLOR, width=line_widths),
     )
     if has_rms:
+        clip_lo, clip_hi = _rms_clip_range(rms_values)
         marker_kwargs.update(
             color=rms_values,
-            cmin=0,
-            cmax=rms_max,
-            colorscale="Viridis",
+            cmin=clip_lo,
+            cmax=clip_hi,
+            colorscale=_viridis_with_over(),
             showscale=True,
             colorbar=dict(
                 orientation="h",
@@ -871,6 +885,156 @@ def _top_rms_electrodes(wd: WellData, n: int) -> list[int]:
     ordered = sorted(rms.items(), key=lambda kv: kv[1], reverse=True)
     return [eid for eid, _ in ordered[:n]]
 
+
+def _rms_clip_range(
+    rms_values: list[float],
+    *,
+    lo_pct: float = 2,
+    hi_pct: float = 98,
+) -> tuple[float, float]:
+    nonzero = [v for v in rms_values if v > 0]
+    if len(nonzero) < 5:
+        mx = max(nonzero) if nonzero else 0.0
+        return (0.0, mx)
+    arr = np.asarray(nonzero, dtype=float)
+    p_lo, p_hi = np.percentile(arr, [lo_pct, hi_pct])
+    p_lo = max(0.0, float(p_lo))
+    p_hi = float(p_hi)
+    if p_hi <= p_lo:
+        p_hi = p_lo + 1.0
+    return (p_lo, p_hi)
+
+
+def _viridis_with_over(over_fraction: float = 0.03) -> list[list]:
+    from plotly.colors import get_colorscale
+
+    base = get_colorscale("Viridis")
+    cutoff = 1.0 - over_fraction
+    scaled = [[pos * cutoff, color] for pos, color in base]
+    scaled.append([cutoff + 0.001, _OVER_COLOR])
+    scaled.append([1.0, _OVER_COLOR])
+    return scaled
+
+
+def _sample_viridis(t: float) -> str:
+    from plotly.colors import sample_colorscale
+
+    rgb = sample_colorscale("Viridis", max(0.0, min(1.0, t)))[0]
+    return rgb
+
+
+def _build_rms_histogram_figure(
+    rms_values: list[float],
+    clip_lo: float,
+    clip_hi: float,
+) -> go.Figure:
+    fig = go.Figure()
+    nonzero = [v for v in rms_values if v > 0]
+    if len(nonzero) < 5:
+        fig.update_layout(
+            margin=dict(l=0, r=0, t=0, b=0),
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            xaxis=dict(visible=False),
+            yaxis=dict(visible=False),
+            height=10,
+        )
+        return fig
+
+    arr = np.asarray(nonzero, dtype=float)
+    counts, edges = np.histogram(arr, bins=50)
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    widths = np.diff(edges)
+
+    kernel = np.array([1, 2, 4, 6, 4, 2, 1], dtype=float)
+    kernel /= kernel.sum()
+    smoothed = np.convolve(counts.astype(float), kernel, mode="same")
+
+    rng = clip_hi - clip_lo if clip_hi > clip_lo else 1.0
+    bar_colors = []
+    for c in centers:
+        if c > clip_hi:
+            bar_colors.append(_OVER_COLOR)
+        else:
+            t = max(0.0, min(1.0, (c - clip_lo) / rng))
+            bar_colors.append(_sample_viridis(t))
+
+    fig.add_trace(
+        go.Bar(
+            x=centers,
+            y=smoothed,
+            width=widths,
+            marker=dict(color=bar_colors, line=dict(width=0)),
+            hoverinfo="skip",
+            opacity=0.7,
+        )
+    )
+
+    for val in [clip_lo, clip_hi]:
+        fig.add_vline(
+            x=val,
+            line=dict(color="#5a5648", width=1.5, dash="dash"),
+        )
+
+    n_over = int(np.sum(arr > clip_hi))
+    over_pct = 100.0 * n_over / len(arr)
+
+    n_strip = 80
+    strip_x = np.linspace(0, float(arr.max()), n_strip)
+    strip_w = float(arr.max()) / n_strip
+    strip_colors = []
+    for sx in strip_x:
+        if sx > clip_hi:
+            strip_colors.append(_OVER_COLOR)
+        else:
+            t = max(0.0, min(1.0, (sx - clip_lo) / rng))
+            strip_colors.append(_sample_viridis(t))
+
+    y_max = float(smoothed.max()) if smoothed.max() > 0 else 1.0
+    strip_height = y_max * 0.08
+
+    fig.add_trace(
+        go.Bar(
+            x=strip_x.tolist(),
+            y=[strip_height] * n_strip,
+            width=strip_w,
+            marker=dict(color=strip_colors, line=dict(width=0)),
+            hoverinfo="skip",
+            opacity=1.0,
+        )
+    )
+
+    fig.update_layout(
+        margin=dict(l=8, r=8, t=2, b=16),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        barmode="overlay",
+        bargap=0,
+        xaxis=dict(
+            range=[0, float(arr.max()) * 1.02],
+            showgrid=False,
+            zeroline=False,
+            tickfont=dict(family="IBM Plex Sans", size=9, color="#8a8472"),
+            tickvals=[round(clip_lo, 1), round(clip_hi, 1)],
+        ),
+        yaxis=dict(visible=False),
+        height=64,
+        showlegend=False,
+        annotations=[
+            dict(
+                text=f"{n_over} over ({over_pct:.0f}%)",
+                x=1.0,
+                xref="paper",
+                xanchor="right",
+                y=1.0,
+                yref="paper",
+                yanchor="top",
+                showarrow=False,
+                font=dict(family="IBM Plex Sans", size=9, color=_OVER_COLOR),
+            ),
+        ],
+    )
+    return fig
 
 
 def _fmt_time(seconds: float | None) -> str:
