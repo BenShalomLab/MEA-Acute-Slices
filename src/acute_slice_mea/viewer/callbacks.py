@@ -396,6 +396,32 @@ def register_all(app, library: LibraryIndex) -> None:
             return max(0.25, gain / 1.4)
         raise PreventUpdate
 
+    # -- window preset controls ----------------------------------------
+
+    @app.callback(
+        Output("traces-graph", "figure", allow_duplicate=True),
+        Input({"type": "window-preset", "seconds": ALL}, "n_clicks"),
+        State("traces-graph", "figure"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        prevent_initial_call=True,
+    )
+    def on_window_preset(_clicks, current_fig, recording_id, well_id):
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        span = float(triggered["seconds"])
+        wd = _well_data(recording_id, well_id)
+        duration = wd.duration_sec if wd else 60.0
+        xrange = current_fig.get("layout", {}).get("xaxis", {}).get("range", [0, 5])
+        center = (xrange[0] + xrange[1]) / 2
+        a = max(0, center - span / 2)
+        b = min(duration, a + span)
+        a = max(0, b - span)
+        patch = Patch()
+        patch["layout"]["xaxis"]["range"] = [a, b]
+        return patch
+
     # -- traces figure ------------------------------------------------
 
     @app.callback(
@@ -764,7 +790,7 @@ def _build_traces_figure(
     _mem("build_traces  BEFORE FigureResampler")
     fig = FigureResampler(
         go.Figure(),
-        default_n_shown_samples=1000,
+        default_n_shown_samples=3000,
         resampled_trace_prefix_suffix=("", ""),
         show_mean_aggregation_size=False,
     )

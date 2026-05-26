@@ -239,6 +239,25 @@ def _control_bar() -> html.Div:
                     html.Button("+", id="gain-up", className="step", n_clicks=0),
                 ],
             ),
+            html.Div(className="ctrl-divider"),
+            html.Div(
+                className="ctrl-group",
+                children=[
+                    html.Span("Window", className="ctrl-label"),
+                    html.Div(
+                        className="seg",
+                        children=[
+                            html.Button(
+                                f"{s}s",
+                                id={"type": "window-preset", "seconds": s},
+                                className="seg-btn",
+                                n_clicks=0,
+                            )
+                            for s in [1, 2, 5, 10, 30]
+                        ],
+                    ),
+                ],
+            ),
             html.Div(className="ctrl-spacer"),
             html.Div(
                 className="ctrl-group",
