@@ -206,13 +206,10 @@ def _center_column() -> html.Div:
             html.Div(
                 id="center-stage",
                 className="center-stage",
-                children=dcc.Loading(
-                    dcc.Graph(
-                        id="traces-graph",
-                        config={"displaylogo": False, "displayModeBar": "hover"},
-                        style={"height": "100%", "minHeight": "320px"},
-                    ),
-                    type="circle",
+                children=dcc.Graph(
+                    id="traces-graph",
+                    config={"displaylogo": False, "displayModeBar": "hover"},
+                    style={"height": "100%", "minHeight": "320px"},
                 ),
             ),
             html.Div(id="meta-strip", className="meta-strip"),
@@ -264,7 +261,11 @@ def _control_bar() -> html.Div:
             html.Div(className="ctrl-spacer"),
             html.Div(
                 className="ctrl-group",
-                children=html.Span(id="trace-count-readout", className="muted"),
+                children=dcc.Loading(
+                    html.Span(id="trace-count-readout", className="muted"),
+                    type="circle",
+                    parent_style={"display": "inline-flex", "alignItems": "center"},
+                ),
             ),
         ],
     )
