@@ -733,7 +733,7 @@ def _build_traces_figure(
         return fig
 
     capped = selected_channels[:MAX_TRACE_ELECTRODES]
-    payloads = wd.traces_for(capped, signal="lfp", decimate=False)
+    payloads = wd.traces_for(capped, signal="lfp")
     if not payloads:
         _current_resampler = None
         fig = go.Figure()
