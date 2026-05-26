@@ -12,11 +12,14 @@ instead of naive subsampling.
 from __future__ import annotations
 
 from functools import lru_cache
+import logging
+import os
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import plotly.graph_objects as go
+import psutil
 from dash import ALL, Input, Output, Patch, State, callback_context, ctx, html, no_update
 from dash.exceptions import PreventUpdate
 from plotly_resampler import FigureResampler
@@ -39,6 +42,15 @@ _SELECTED_RING_COLOR = "#1a1a1a"
 _SELECTED_RING_WIDTH = 2
 
 _current_resampler: FigureResampler | None = None
+
+_proc = psutil.Process(os.getpid())
+_dbg = logging.getLogger("mem_debug")
+
+
+def _mem(label: str) -> float:
+    rss_gb = _proc.memory_info().rss / (1024**3)
+    _dbg.warning("MEM %-50s  RSS=%.2f GB", label, rss_gb)
+    return rss_gb
 
 
 @lru_cache(maxsize=16)
@@ -706,6 +718,8 @@ def _build_traces_figure(
 ) -> go.Figure:
     global _current_resampler
 
+    _mem(f"build_traces  START  n_selected={len(selected_channels)} gain={gain}")
+
     if wd is None or not selected_channels:
         _current_resampler = None
         fig = go.Figure()
@@ -728,7 +742,11 @@ def _build_traces_figure(
         )
         return fig
 
+    _mem("build_traces  BEFORE traces_for")
     payloads = wd.traces_for(selected_channels, signal="lfp")
+    total_pts = sum(len(p["time_sec"]) for p in payloads)
+    _mem(f"build_traces  AFTER traces_for  n_payloads={len(payloads)} total_pts={total_pts}")
+
     if not payloads:
         _current_resampler = None
         fig = go.Figure()
@@ -743,6 +761,7 @@ def _build_traces_figure(
         )
         return fig
 
+    _mem("build_traces  BEFORE FigureResampler")
     fig = FigureResampler(
         go.Figure(),
         default_n_shown_samples=1000,
@@ -799,6 +818,7 @@ def _build_traces_figure(
     )
 
     _current_resampler = fig
+    _mem("build_traces  DONE  resampler assigned")
     return fig
 
 
