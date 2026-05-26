@@ -8,7 +8,7 @@ from pathlib import Path
 import sys
 from time import perf_counter
 
-from acute_slice_mea.bursts import compute_bursts_from_recording
+from acute_slice_mea.bursts import BurstDetectionParams, compute_bursts_from_recording
 from acute_slice_mea.cache import save_cache_bundle
 from acute_slice_mea.dashboard import export_dashboard_data
 from acute_slice_mea.electrodes import build_electrode_table
@@ -38,9 +38,17 @@ class AnalysisConfig:
     lfp_high_hz: float = 300
     spike_low_hz: float = 300
     spike_high_hz: float = 3000
+    notch_freqs_hz: list[float] = field(default_factory=lambda: [60.0, 120.0])
+    notch_q: float = 30.0
+    downsample_hz: int = 0
+    lfp_reference_method: str = "median"
+    lfp_reference_scope: str = "global"
+    lfp_reference_inner_radius: float = 30.0
+    lfp_reference_outer_radius: float = 200.0
     lfp_window_sec: float = 10
     lfp_step_sec: float = 5
     welch_segment_sec: float = 2
+    welch_overlap_frac: float = 0.5
     spectrum_duration_sec: float = 10
     spectrum_max_freq_hz: float = 150
     preview_start_sec: float = 0
@@ -54,6 +62,8 @@ class AnalysisConfig:
     compute_trace_preview: bool = True
     compute_bursts: bool = True
     burst_detection_max_sec: float = 120.0
+    burst_zscore_threshold: float = 3.0
+    burst_min_duration_ms: float = 30.0
     export_probe_geometry: bool = True
     compute_rms_per_electrode: bool = True
     rms_window_sec: float = 10.0
@@ -94,8 +104,15 @@ def run_analysis(config: AnalysisConfig) -> dict:
         lfp_high_hz=config.lfp_high_hz,
         spike_low_hz=config.spike_low_hz,
         spike_high_hz=config.spike_high_hz,
+        notch_freqs_hz=config.notch_freqs_hz,
+        notch_q=config.notch_q,
+        downsample_hz=config.downsample_hz,
         apply_lfp_common_reference=config.apply_lfp_common_reference,
         apply_spike_common_reference=config.apply_spike_common_reference,
+        lfp_reference_method=config.lfp_reference_method,
+        lfp_reference_scope=config.lfp_reference_scope,
+        lfp_reference_inner_radius=config.lfp_reference_inner_radius,
+        lfp_reference_outer_radius=config.lfp_reference_outer_radius,
         lfp_filter_margin_ms=config.lfp_filter_margin_ms,
         lfp_ignore_low_freq_error=config.lfp_ignore_low_freq_error,
     )
@@ -155,10 +172,15 @@ def run_analysis(config: AnalysisConfig) -> dict:
     bursts: list[dict] | None = None
     if config.compute_bursts:
         _log_verbose(config, "Detecting network bursts")
+        burst_params = BurstDetectionParams(
+            threshold_sd=config.burst_zscore_threshold,
+            min_duration_ms=config.burst_min_duration_ms,
+        )
         bursts = compute_bursts_from_recording(
             recordings["lfp"],
             electrode_table=electrodes,
             duration_sec=config.burst_detection_max_sec,
+            params=burst_params,
         )
 
     rms_by_electrode: dict[int, float] = {}
