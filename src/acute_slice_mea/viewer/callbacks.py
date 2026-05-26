@@ -769,7 +769,7 @@ def _build_traces_figure(
         return fig
 
     _mem("build_traces  BEFORE traces_for")
-    payloads = wd.traces_for(selected_channels, signal="lfp")
+    payloads = wd.traces_for(selected_channels, signal="lfp", decimate=False)
     total_pts = sum(len(p["time_sec"]) for p in payloads)
     _mem(f"build_traces  AFTER traces_for  n_payloads={len(payloads)} total_pts={total_pts}")
 
@@ -826,6 +826,7 @@ def _build_traces_figure(
         showlegend=False,
         xaxis=dict(
             range=[0, initial_end],
+            rangeslider=dict(visible=True, thickness=0.08),
             showgrid=True,
             gridcolor="rgba(26, 25, 22, 0.06)",
             zeroline=False,

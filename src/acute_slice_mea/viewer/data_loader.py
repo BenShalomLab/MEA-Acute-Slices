@@ -38,7 +38,7 @@ def _mem(label: str) -> float:
 
 # Target points per electrode per window for the lazy reader. ~2k is enough for
 # smooth WebGL line rendering at any window size the UI exposes (≤ 60 s).
-_LAZY_TARGET_POINTS = 10000
+_LAZY_TARGET_POINTS = 2000
 
 
 @dataclass
