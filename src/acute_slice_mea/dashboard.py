@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -15,7 +16,7 @@ from acute_slice_mea.spectral import DEFAULT_LFP_BANDS, get_traces_safe
 def _progress_iter(iterable, *, total=None, desc=None):
     from tqdm import tqdm
 
-    return tqdm(iterable, total=total, desc=desc)
+    return tqdm(iterable, total=total, desc=desc, file=sys.stderr, dynamic_ncols=True)
 
 SIGNAL_LABELS = {
     "raw": "No filter",

@@ -44,6 +44,7 @@ def build_cache_for(
     compute_bursts: bool = True,
     export_probe_geometry: bool = True,
     export_dashboard_data: bool = True,
+    apply_cmr: bool = True,
 ) -> Path:
     """Run ``run_analysis`` for one (recording, well); return the cache dir."""
     # recording.run already encodes /{rec_name} for multi-rec entries, so the
@@ -68,6 +69,8 @@ def build_cache_for(
         compute_bursts=compute_bursts,
         export_probe_geometry=export_probe_geometry,
         export_dashboard_data=export_dashboard_data,
+        apply_lfp_common_reference=apply_cmr,
+        apply_spike_common_reference=apply_cmr,
     )
     started = perf_counter()
     run_analysis(config)
@@ -104,6 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-bursts", action="store_true", help="Skip network-burst detection.")
     parser.add_argument("--no-probe-geometry", action="store_true", help="Skip probe geometry export.")
     parser.add_argument("--no-dashboard", action="store_true", help="Skip dashboard JSON export.")
+    parser.add_argument("--no-cmr", action="store_true", help="Disable common median reference (reduces RAM).")
     args = parser.parse_args(argv)
 
     compute_spectrum = not (args.no_spectrum or args.minimal)
@@ -144,6 +148,7 @@ def main(argv: list[str] | None = None) -> int:
                     compute_bursts=compute_bursts,
                     export_probe_geometry=export_probe_geometry,
                     export_dashboard_data=export_dashboard_data,
+                    apply_cmr=not args.no_cmr,
                 )
             except Exception:
                 total_failures += 1

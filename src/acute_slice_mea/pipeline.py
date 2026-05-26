@@ -68,9 +68,9 @@ class AnalysisConfig:
     verbose: bool = False
 
 
-def _log_verbose(config: AnalysisConfig, message: str) -> None:
-    if config.verbose:
-        print(message, file=sys.stderr)
+def _log_stage(started: float, message: str) -> None:
+    elapsed = perf_counter() - started
+    print(f"[{elapsed:6.1f}s] {message}", file=sys.stderr, flush=True)
 
 
 def run_analysis(config: AnalysisConfig) -> dict:
@@ -80,14 +80,14 @@ def run_analysis(config: AnalysisConfig) -> dict:
     figures_dir = output_dir / "figures"
 
     if config.spikeinterface_chunk_duration:
-        _log_verbose(config, "Configuring SpikeInterface jobs")
+        _log_stage(started, "Configuring SpikeInterface jobs")
         import spikeinterface as si
 
         si.set_global_job_kwargs(chunk_duration=config.spikeinterface_chunk_duration)
 
-    _log_verbose(config, "Loading recording")
+    _log_stage(started, "Loading recording")
     raw = load_maxwell_recording(config.data_path, config.well_id, rec_name=config.rec_name)
-    _log_verbose(config, "Preparing recordings")
+    _log_stage(started, "Preparing recordings")
     recordings = prepare_recordings(
         raw,
         lfp_low_hz=config.lfp_low_hz,
@@ -102,11 +102,11 @@ def run_analysis(config: AnalysisConfig) -> dict:
     metadata_recording = recordings["raw"]
     fs = float(metadata_recording.get_sampling_frequency())
     num_samples = int(metadata_recording.get_num_samples())
-    _log_verbose(config, "Building electrode table")
+    _log_stage(started, "Building electrode table")
     electrodes = build_electrode_table(metadata_recording.get_probe(), metadata_recording)
     recorded = electrodes[electrodes["recorded"].astype(bool)]
 
-    _log_verbose(config, "Computing LFP band power")
+    _log_stage(started, "Computing LFP band power")
     band_power = compute_lfp_band_power_over_time(
         recordings["lfp"],
         electrode_table=electrodes,
@@ -126,7 +126,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
     spectrum: dict | None = None
     if config.compute_spectrum:
-        _log_verbose(config, "Computing spectrum summary")
+        _log_stage(started, "Computing spectrum summary")
         spectrum = compute_welch_spectrum_summary(
             recordings["lfp"],
             channel_ids=recorded["channel_id"].tolist(),
@@ -140,7 +140,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
     trace_preview: dict | None = None
     if config.compute_trace_preview:
-        _log_verbose(config, "Computing trace preview")
+        _log_stage(started, "Computing trace preview")
         trace_preview = compute_trace_preview(
             recordings,
             electrode_table=electrodes,
@@ -154,7 +154,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
     bursts: list[dict] | None = None
     if config.compute_bursts:
-        _log_verbose(config, "Detecting network bursts")
+        _log_stage(started, "Detecting network bursts")
         bursts = compute_bursts_from_recording(
             recordings["lfp"],
             electrode_table=electrodes,
@@ -163,7 +163,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
     rms_by_electrode: dict[int, float] = {}
     if config.compute_rms_per_electrode:
-        _log_verbose(config, "Computing per-electrode RMS")
+        _log_stage(started, "Computing per-electrode RMS")
         rms_by_electrode = compute_lfp_rms_per_electrode(
             recordings["lfp"],
             electrode_table=electrodes,
@@ -176,7 +176,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
 
     probe_geometry: dict | None = None
     if config.export_probe_geometry:
-        _log_verbose(config, "Building probe geometry")
+        _log_stage(started, "Building probe geometry")
         probe_geometry = build_probe_geometry(electrodes)
 
     elapsed_sec = perf_counter() - started
@@ -191,7 +191,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
     }
     summary["preview_electrode_ids_resolved"] = preview_electrode_ids
     summary["num_bursts"] = None if bursts is None else len(bursts)
-    _log_verbose(config, "Saving cache bundle")
+    _log_stage(started, "Saving cache bundle")
     manifest = save_cache_bundle(
         output_dir,
         summary=summary,
@@ -202,7 +202,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         bursts=bursts,
         probe_geometry=probe_geometry,
     )
-    _log_verbose(config, "Writing figures")
+    _log_stage(started, "Writing figures")
     figure_paths = {
         "band_power": str(write_band_power_html(band_power, figures_dir / "lfp_band_power.html")),
     }
@@ -216,7 +216,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
         )
     manifest["files"]["figures"] = figure_paths
     if config.export_dashboard_data:
-        _log_verbose(config, "Exporting dashboard data")
+        _log_stage(started, "Exporting dashboard data")
         manifest["files"]["dashboard"] = export_dashboard_data(
             output_dir / "dashboard",
             recordings=recordings,
@@ -226,6 +226,6 @@ def run_analysis(config: AnalysisConfig) -> dict:
             max_points_per_electrode=config.dashboard_max_points_per_electrode,
             progress=config.progress,
         )
-    _log_verbose(config, "Writing manifest")
+    _log_stage(started, "Writing manifest")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
     return manifest
