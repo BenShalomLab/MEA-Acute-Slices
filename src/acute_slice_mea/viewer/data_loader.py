@@ -273,11 +273,10 @@ class WellData:
         return results
 
     def clear_trace_cache(self) -> None:
-        _read_trace_json_cached.cache_clear()
-        _lazy_lfp_window.cache_clear()
+        clear_all_caches()
 
 
-@lru_cache(maxsize=512)
+@lru_cache(maxsize=32)
 def _read_trace_json_cached(path: str) -> dict:
     return json.loads(Path(path).read_text())
 
@@ -285,7 +284,7 @@ def _read_trace_json_cached(path: str) -> dict:
 # -- Lazy SpikeInterface fallback ---------------------------------------
 
 
-@lru_cache(maxsize=4)
+@lru_cache(maxsize=2)
 def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     """Cache the (signed → bandpass → common-ref) chain per well."""
     from acute_slice_mea.recording import load_maxwell_recording, prepare_recordings
@@ -294,7 +293,7 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     return prepare_recordings(raw)
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=4)
 def _lazy_lfp_window(
     *,
     raw_path: str,
@@ -339,3 +338,9 @@ def _lazy_lfp_window(
             traces = traces[::step]
     time_arr = (np.arange(traces.shape[0], dtype=np.float64) * step + start_frame) / fs
     return time_arr, traces
+
+
+def clear_all_caches() -> None:
+    _read_trace_json_cached.cache_clear()
+    _lazy_lfp_window.cache_clear()
+    _open_prepared_recording.cache_clear()

@@ -41,7 +41,7 @@ _SELECTED_RING_WIDTH = 2
 _current_resampler: FigureResampler | None = None
 
 
-@lru_cache(maxsize=16)
+@lru_cache(maxsize=4)
 def _load_well_data(cache_dir: str) -> WellData:
     return WellData.load(cache_dir)
 
@@ -706,8 +706,11 @@ def _build_traces_figure(
 ) -> go.Figure:
     global _current_resampler
 
-    if wd is None or not selected_channels:
+    if _current_resampler is not None:
+        _current_resampler._hf_data = {}
         _current_resampler = None
+
+    if wd is None or not selected_channels:
         fig = go.Figure()
         fig.update_layout(
             margin=dict(l=20, r=20, t=10, b=30),
