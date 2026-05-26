@@ -15,13 +15,25 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from functools import lru_cache
 import json
+import logging
+import os
 from pathlib import Path
 from typing import Iterable
 
 import numpy as np
 import pandas as pd
+import psutil
 
 from acute_slice_mea.cache import load_band_power, load_cache_manifest
+
+_proc = psutil.Process(os.getpid())
+_dbg = logging.getLogger("mem_debug")
+
+
+def _mem(label: str) -> float:
+    rss_gb = _proc.memory_info().rss / (1024**3)
+    _dbg.warning("MEM %-50s  RSS=%.2f GB", label, rss_gb)
+    return rss_gb
 
 
 # Target points per electrode per window for the lazy reader. ~2k is enough for
@@ -250,6 +262,7 @@ class WellData:
         if not channel_ids:
             return []
 
+        _mem(f"traces_from_recording START  n_ch={len(channel_ids)} t=[{t_lo:.1f},{t_hi:.1f}] dec={decimate}")
         time_arr, traces = _lazy_lfp_window(
             raw_path=str(self.raw_path),
             well_id=str(self.well_id),
@@ -260,6 +273,7 @@ class WellData:
             t_end=float(t_hi),
             decimate=decimate,
         )
+        _mem(f"traces_from_recording DONE   shape={traces.shape} dtype={traces.dtype}")
         results: list[dict] = []
         for idx, (eid, cid) in enumerate(zip(kept_eids, channel_ids)):
             results.append(
@@ -292,8 +306,12 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     from acute_slice_mea.recording import load_maxwell_recording, prepare_recordings
 
     si.set_global_job_kwargs(chunk_duration="60s")
+    _mem("open_prepared  BEFORE load_maxwell")
     raw = load_maxwell_recording(raw_path, well_id, rec_name=rec_name)
-    return prepare_recordings(raw)
+    _mem(f"open_prepared  AFTER load_maxwell  n_ch={raw.get_num_channels()} fs={raw.get_sampling_frequency()} n_frames={raw.get_num_frames()}")
+    recs = prepare_recordings(raw)
+    _mem("open_prepared  AFTER prepare_recordings (lazy)")
+    return recs
 
 
 @lru_cache(maxsize=8)
@@ -325,13 +343,18 @@ def _lazy_lfp_window(
     end_frame = max(start_frame + 1, int(round(t_end * fs)))
     end_frame = min(end_frame, int(recording.get_num_frames()))
 
+    n_frames = end_frame - start_frame
+    total_ch = getattr(recording, 'get_num_channels', lambda: '?')()
+    _mem(f"lazy_lfp  BEFORE get_traces  frames={n_frames} n_ch={len(channel_ids)} total_rec_ch={total_ch}")
     traces = recording.get_traces(
         start_frame=start_frame,
         end_frame=end_frame,
         channel_ids=list(channel_ids),
         return_scaled=False,
     )
+    _mem(f"lazy_lfp  AFTER get_traces   raw_shape={traces.shape} dtype={traces.dtype}")
     traces = np.asarray(traces, dtype=np.float32)
+    _mem(f"lazy_lfp  AFTER asarray      shape={traces.shape}")
 
     _MAX_SAMPLES = 500_000
     n_samples = traces.shape[0]
