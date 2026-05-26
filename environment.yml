@@ -2,7 +2,7 @@ name: acute-slice-mea
 channels:
   - conda-forge
 dependencies:
-  - python=3.11
+  - python=3.13
   - pip
   - jupyterlab
   - ipykernel

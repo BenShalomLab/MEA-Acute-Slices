@@ -250,24 +250,24 @@ class WellData:
         if not channel_ids:
             return []
 
-        time_arr, traces = _lazy_lfp_window(
-            raw_path=str(self.raw_path),
-            well_id=str(self.well_id),
-            rec_name=self.rec_name,
-            signal=signal,
-            channel_ids=tuple(channel_ids),
-            t_start=float(t_lo),
-            t_end=float(t_hi),
-            decimate=decimate,
-        )
         results: list[dict] = []
-        for idx, (eid, cid) in enumerate(zip(kept_eids, channel_ids)):
+        for eid, cid in zip(kept_eids, channel_ids):
+            time_arr, values = _lazy_lfp_channel(
+                raw_path=str(self.raw_path),
+                well_id=str(self.well_id),
+                rec_name=self.rec_name,
+                signal=signal,
+                channel_id=cid,
+                t_start=float(t_lo),
+                t_end=float(t_hi),
+                decimate=decimate,
+            )
             results.append(
                 {
                     "electrode_id": int(eid),
                     "channel_id": cid,
                     "time_sec": time_arr,
-                    "value": traces[:, idx],
+                    "value": values,
                 }
             )
         return results
@@ -293,27 +293,22 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     return prepare_recordings(raw)
 
 
-@lru_cache(maxsize=4)
-def _lazy_lfp_window(
+@lru_cache(maxsize=64)
+def _lazy_lfp_channel(
     *,
     raw_path: str,
     well_id: str,
     rec_name: str | None,
     signal: str,
-    channel_ids: tuple[str, ...],
+    channel_id: str,
     t_start: float,
     t_end: float,
     decimate: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Read a window of LFP/raw/spike traces lazily.
+    """Read a single channel window lazily.
 
-    Returns ``(time_sec, values)`` where ``values`` has shape
-    ``(n_samples, len(channel_ids))`` in microvolts (or the recording's
-    physical units — SpikeInterface returns float32 in chip units after
-    bandpass+common-reference).
-
-    When *decimate* is False the full-resolution data is returned so that
-    plotly-resampler can apply MinMaxLTTB aggregation on the client side.
+    Returns ``(time_sec, values_1d)`` for one channel. Per-channel caching
+    means changing electrode selection reuses already-loaded channels.
     """
     recordings = _open_prepared_recording(raw_path, well_id, rec_name)
     recording = recordings.get(signal) or recordings["lfp"]
@@ -325,22 +320,22 @@ def _lazy_lfp_window(
     traces = recording.get_traces(
         start_frame=start_frame,
         end_frame=end_frame,
-        channel_ids=list(channel_ids),
+        channel_ids=[channel_id],
         return_scaled=False,
     )
-    traces = np.asarray(traces, dtype=np.float32)
+    values = np.asarray(traces[:, 0], dtype=np.float32)
 
-    n_samples = traces.shape[0]
+    n_samples = values.shape[0]
     step = 1
     if decimate:
         step = max(1, n_samples // _LAZY_TARGET_POINTS)
         if step > 1:
-            traces = traces[::step]
-    time_arr = (np.arange(traces.shape[0], dtype=np.float64) * step + start_frame) / fs
-    return time_arr, traces
+            values = values[::step]
+    time_arr = (np.arange(values.shape[0], dtype=np.float64) * step + start_frame) / fs
+    return time_arr, values
 
 
 def clear_all_caches() -> None:
     _read_trace_json_cached.cache_clear()
-    _lazy_lfp_window.cache_clear()
+    _lazy_lfp_channel.cache_clear()
     _open_prepared_recording.cache_clear()

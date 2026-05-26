@@ -136,7 +136,7 @@ def test_traces_for_falls_back_to_recording_when_dashboard_missing(tmp_path, mon
         "files": {"summary": str(cache / "summary.json"), "electrodes": str(cache / "electrodes.csv")},
     }))
 
-    calls = {}
+    calls: dict = {"all_channel_ids": []}
 
     class _FakeRec:
         def __init__(self):
@@ -150,7 +150,7 @@ def test_traces_for_falls_back_to_recording_when_dashboard_missing(tmp_path, mon
             return self.n
 
         def get_traces(self, *, start_frame, end_frame, channel_ids, return_scaled):
-            calls["channel_ids"] = list(channel_ids)
+            calls["all_channel_ids"].extend(channel_ids)
             calls["start_frame"] = start_frame
             calls["end_frame"] = end_frame
             n = end_frame - start_frame
@@ -160,14 +160,14 @@ def test_traces_for_falls_back_to_recording_when_dashboard_missing(tmp_path, mon
         return {"lfp": _FakeRec(), "raw": _FakeRec(), "spike": _FakeRec()}
 
     monkeypatch.setattr(dl, "_open_prepared_recording", fake_open)
-    dl._lazy_lfp_window.cache_clear()
+    dl._lazy_lfp_channel.cache_clear()
 
     wd = dl.WellData.load(cache)
     payloads = wd.traces_for([10, 11], t0=1.0, t1=3.0)
 
     assert len(payloads) == 2
     assert {p["electrode_id"] for p in payloads} == {10, 11}
-    assert calls["channel_ids"] == ["100", "101"]
+    assert sorted(calls["all_channel_ids"]) == ["100", "101"]
     assert calls["start_frame"] == 1000
     assert calls["end_frame"] == 3000
     assert payloads[0]["time_sec"][0] == 1.0

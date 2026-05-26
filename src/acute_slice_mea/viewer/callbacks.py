@@ -33,6 +33,7 @@ from acute_slice_mea.viewer.data_loader import WellData
 from acute_slice_mea.viewer.layout import PLATE_COLS, PLATE_ROWS
 
 DEFAULT_SELECTION_SIZE = 6
+MAX_TRACE_ELECTRODES = 24
 TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
@@ -731,7 +732,8 @@ def _build_traces_figure(
         )
         return fig
 
-    payloads = wd.traces_for(selected_channels, signal="lfp", decimate=False)
+    capped = selected_channels[:MAX_TRACE_ELECTRODES]
+    payloads = wd.traces_for(capped, signal="lfp", decimate=False)
     if not payloads:
         _current_resampler = None
         fig = go.Figure()
