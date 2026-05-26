@@ -11,6 +11,12 @@ import pandas as pd
 from acute_slice_mea.cache import load_band_power, load_cache_manifest
 from acute_slice_mea.spectral import DEFAULT_LFP_BANDS, get_traces_safe
 
+
+def _progress_iter(iterable, *, total=None, desc=None):
+    from tqdm import tqdm
+
+    return tqdm(iterable, total=total, desc=desc)
+
 SIGNAL_LABELS = {
     "raw": "No filter",
     "lfp": "LFP 0.5-300 Hz",
@@ -57,6 +63,40 @@ def _recorded_electrodes(electrodes: pd.DataFrame) -> pd.DataFrame:
     return recorded.sort_values("electrode_id")
 
 
+_DEFAULT_POINTS_PER_CHUNK = 1000
+
+
+def _read_decimated_all_channels(
+    recording,
+    channel_ids,
+    num_samples: int,
+    step: int,
+    points_per_chunk: int = _DEFAULT_POINTS_PER_CHUNK,
+    progress: bool = False,
+    desc: str | None = None,
+) -> np.ndarray:
+    """Read all channels in time chunks, decimate, return (num_decimated, num_channels).
+
+    Batches all channels per read so SpikeInterface's common_reference
+    is evaluated once per chunk instead of once per electrode.
+    """
+    chunk_raw = int(points_per_chunk) * step
+    starts = list(range(0, num_samples, chunk_raw))
+    if progress:
+        starts = _progress_iter(starts, total=len(starts), desc=desc)
+    parts: list[np.ndarray] = []
+    for s in starts:
+        e = min(s + chunk_raw, num_samples)
+        traces = get_traces_safe(recording, s, e, channel_ids)
+        parts.append(np.asarray(traces[::step], dtype=float))
+    result = np.concatenate(parts, axis=0)
+    expected_rows = len(range(0, num_samples, step))
+    assert result.shape[0] == expected_rows, (
+        f"Decimation alignment error: got {result.shape[0]} rows, expected {expected_rows}"
+    )
+    return result
+
+
 def export_dashboard_data(
     dashboard_dir,
     *,
@@ -66,6 +106,7 @@ def export_dashboard_data(
     summary: dict,
     max_points_per_electrode=20000,
     include_signals=("raw", "lfp", "spike"),
+    progress: bool = False,
 ) -> dict:
     """Export dashboard data files for lazy loading by a static HTML page."""
     dashboard_dir = Path(dashboard_dir)
@@ -83,13 +124,31 @@ def export_dashboard_data(
     sample_frames = np.arange(0, num_samples, step)
     time_sec = sample_frames / fs
 
+    channel_ids = recorded["channel_id"].tolist()
+    channel_to_col = {ch: i for i, ch in enumerate(channel_ids)}
+
     trace_index: dict[str, dict[str, str]] = {signal: {} for signal in signals}
     for signal in signals:
         recording = recordings[signal]
         signal_dir = traces_dir / signal
-        for row in recorded.itertuples(index=False):
-            traces = get_traces_safe(recording, 0, num_samples, [row.channel_id])
-            values = np.asarray(traces[::step, 0], dtype=float)
+        all_decimated = _read_decimated_all_channels(
+            recording,
+            channel_ids,
+            num_samples,
+            step,
+            progress=progress,
+            desc=f"Dashboard traces ({signal})",
+        )
+        rows_iter = recorded.itertuples(index=False)
+        if progress:
+            rows_iter = _progress_iter(
+                rows_iter,
+                total=len(recorded),
+                desc=f"Writing {signal} JSON",
+            )
+        for row in rows_iter:
+            col = channel_to_col[row.channel_id]
+            values = all_decimated[:, col]
             payload = {
                 "signal": signal,
                 "signal_label": SIGNAL_LABELS.get(signal, signal),
@@ -104,6 +163,7 @@ def export_dashboard_data(
             trace_path = signal_dir / f"{int(row.electrode_id)}.json"
             _write_json(trace_path, payload)
             trace_index[signal][str(int(row.electrode_id))] = str(trace_path.relative_to(dashboard_dir))
+        del all_decimated
 
     electrodes_payload = _clean_records(recorded)
     band_power_payload = _clean_records(

@@ -224,6 +224,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
             band_power=band_power,
             summary=summary,
             max_points_per_electrode=config.dashboard_max_points_per_electrode,
+            progress=config.progress,
         )
     _log_verbose(config, "Writing manifest")
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))
