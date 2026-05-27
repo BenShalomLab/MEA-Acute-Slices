@@ -39,7 +39,7 @@ DEFAULT_SELECTION_SIZE = 6
 TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
-_SELECTED_RING_WIDTH = 1
+_SELECTED_RING_WIDTH = 0.5
 _OVER_COLOR = "#b94668"
 
 _current_resampler: FigureResampler | None = None
@@ -730,7 +730,7 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             # (kept full) and is bumped together with the ring above. Unselected
             # dots dim so the picked subset reads at a glance.
             selected=dict(marker=dict(opacity=1.0)),
-            unselected=dict(marker=dict(opacity=0.55)),
+            unselected=dict(marker=dict(opacity=1.0)),
         )
     )
 
