@@ -39,7 +39,7 @@ DEFAULT_SELECTION_SIZE = 6
 TRACE_COLOR = "#0a7d7f"
 BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
-_SELECTED_RING_WIDTH = 2
+_SELECTED_RING_WIDTH = 1
 _OVER_COLOR = "#b94668"
 
 _current_resampler: FigureResampler | None = None
