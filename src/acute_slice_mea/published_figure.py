@@ -500,12 +500,14 @@ def plot_waveform_panel(
     *,
     gap: float | None = None,
     target_points: int = 2000,
+    scale_uv: float = 100.0,
 ):
     """Stacked LFP waveform snapshot, one row per ROI electrode.
 
     Rows are offset by ``gap`` micro-volts (default: 6x the median robust SD
-    across electrodes), top electrode first. A horizontal scale bar annotates
-    the offset magnitude. Returns the computed ``gap``.
+    across electrodes), top electrode first. A fixed ``scale_uv``-µV vertical
+    scale bar is drawn in the left margin, *outside* the plotting area. Returns
+    the computed ``gap``.
     """
     arr = np.asarray(traces, dtype=float)
     if arr.ndim == 1:
@@ -528,19 +530,24 @@ def plot_waveform_panel(
     ax.set_yticklabels([f"E{int(e)}" for e in eids])
     ax.set_xlim(float(t[0]), float(t[-1]))
     ax.set_xlabel("Time (s)")
-    ax.set_ylabel("Electrode")
+    ax.set_ylabel("")  # E## tick labels already identify rows; free the left margin
 
-    # Vertical scale bar (= one `gap` = 6 robust SD of LFP), placed in a margin
-    # below all traces so it never overlaps the bottom (often large-amplitude)
-    # electrode.
+    # Fixed-length vertical scale bar (``scale_uv`` µV) drawn in the left margin,
+    # *outside* the plotting area. ``get_yaxis_transform`` maps x to axes
+    # fractions (negative = left of the spine) and y to data units (µV);
+    # ``clip_on=False`` lets it render outside the axes box.
+    trans = ax.get_yaxis_transform()
     ymin, ymax = ax.get_ylim()
-    x_bar = float(t[0]) + 0.02 * (float(t[-1]) - float(t[0]))
-    bar_bottom = ymin - 0.3 * gap - gap
-    ax.set_ylim(bar_bottom - 0.3 * gap, ymax)
-    ax.plot([x_bar, x_bar], [bar_bottom, bar_bottom + gap], color="black", lw=1.5)
+    yc = 0.5 * (ymin + ymax)
+    y0, y1 = yc - scale_uv / 2.0, yc + scale_uv / 2.0
+    x_bar = -0.09
+    ax.plot(
+        [x_bar, x_bar], [y0, y1], transform=trans,
+        color="black", lw=1.5, clip_on=False,
+    )
     ax.text(
-        x_bar, bar_bottom + gap / 2.0, f"  {gap:.0f} µV",
-        va="center", ha="left", fontsize=8,
+        x_bar - 0.015, yc, f"{scale_uv:.0f} µV", transform=trans,
+        rotation=90, va="center", ha="right", fontsize=8, clip_on=False,
     )
     return gap
 
