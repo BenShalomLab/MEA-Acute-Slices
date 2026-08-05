@@ -15,7 +15,7 @@ import numpy as np
 from scipy import signal as scipy_signal
 
 from acute_slice_mea.electrodes import recorded_electrode_channels
-from acute_slice_mea.spectral import get_traces_safe
+from acute_slice_mea.spectral import _progress_iter, get_traces_safe
 
 
 @dataclass(frozen=True)
@@ -142,11 +142,19 @@ def compute_bursts_from_recording(
     duration_sec: float | None = None,
     params: BurstDetectionParams | None = None,
     return_scaled: bool = True,
+    read_chunk_sec: float = 10.0,
+    progress: bool = False,
 ) -> list[dict]:
     """Run burst detection on a SpikeInterface LFP recording.
 
     Loads at most ``duration_sec`` of data (default: the full recording);
     callers should pass a bound (e.g. 120 s) when the recording is long.
+
+    Reads in ``read_chunk_sec``-second time chunks rather than materializing
+    the full (n_samples, n_channels) array at once -- for a full-channel
+    array that's easily tens of GB (e.g. ~18GB for 939 channels x 120s x
+    20kHz x float64), which OOM-kills the process. Only the reduced 1D
+    population envelope is kept across chunks.
     """
     fs = float(lfp_recording.get_sampling_frequency())
     num_samples = int(lfp_recording.get_num_samples())
@@ -158,11 +166,19 @@ def compute_bursts_from_recording(
         return []
 
     _, channel_ids = recorded_electrode_channels(electrode_table, electrode_ids)
-    traces = get_traces_safe(lfp_recording, 0, end_frame, channel_ids, return_scaled=return_scaled)
-    arr = np.asarray(traces, dtype=float)
 
-    # Reduce to a population envelope cheaply.
-    envelope = np.abs(arr).mean(axis=1)
+    chunk_frames = max(1, int(round(float(read_chunk_sec) * fs)))
+    chunk_starts = list(range(0, end_frame, chunk_frames))
+    iterator = _progress_iter(chunk_starts, total=len(chunk_starts), desc="Burst detection") if progress else chunk_starts
+
+    envelope_chunks: list[np.ndarray] = []
+    for chunk_start in iterator:
+        chunk_end = min(end_frame, chunk_start + chunk_frames)
+        traces = get_traces_safe(lfp_recording, chunk_start, chunk_end, channel_ids, return_scaled=return_scaled)
+        arr = np.asarray(traces, dtype=np.float32)
+        envelope_chunks.append(np.abs(arr).mean(axis=1))
+    envelope = np.concatenate(envelope_chunks) if envelope_chunks else np.empty(0, dtype=np.float32)
+
     # If the underlying recording has a high sample rate, downsample the
     # envelope to ~1 kHz for cheap detection — bursts are slow events.
     target_fs = 1000.0

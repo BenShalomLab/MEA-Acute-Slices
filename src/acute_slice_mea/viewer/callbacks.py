@@ -301,7 +301,7 @@ def register_all(app, library: LibraryIndex) -> None:
             # event on figure replacement) must not wipe the current selection —
             # the "None" quick-select chip is the explicit way to clear.
             raise PreventUpdate
-        return sorted(set(chosen))
+        return _sort_by_routed_order(order, set(chosen))
 
     @app.callback(
         Output("selected-channels", "data", allow_duplicate=True),
@@ -340,7 +340,7 @@ def register_all(app, library: LibraryIndex) -> None:
             current_set.discard(eid)
         else:
             current_set.add(eid)
-        return sorted(current_set)
+        return _sort_by_routed_order(order, current_set)
 
     @app.callback(
         Output("selected-channels", "data", allow_duplicate=True),
@@ -359,10 +359,10 @@ def register_all(app, library: LibraryIndex) -> None:
         wd = _well_data(recording_id, well_id)
         if wd is None:
             raise PreventUpdate
-        valid = set(wd.routed_electrode_ids())
-        if not valid:
+        order = wd.routed_electrode_ids()
+        if not order:
             raise PreventUpdate
-        chosen = _parse_electrode_id_input(text, valid)
+        chosen = _parse_electrode_id_input(text, order)
         if not chosen:
             raise PreventUpdate
         return chosen
@@ -563,34 +563,48 @@ def _routed_entries(wd: WellData) -> list[dict]:
     """Deterministic routed-electrode list shared by figure build and
     selection-event lookup. Falls back to electrodes.csv when probe.json
     is missing so both callers stay in lockstep on the eid order.
+
+    Sorted by physical (y_um, x_um) position rather than source order, so
+    everything downstream (probe-map point order, click/lasso hit-testing,
+    and by extension the trace stack) reads top-to-bottom on the chip.
     """
     routed = (wd.probe or {}).get("routed") or []
-    if routed:
-        return list(routed)
-    recorded = wd.electrodes[wd.electrodes["recorded"].astype(bool)]
-    has_rms = "rms_uv" in recorded.columns
-    return [
-        {
-            "electrode_id": int(row.electrode_id),
-            "x_um": float(row.x_um),
-            "y_um": float(row.y_um),
-            "rms_uv": float(getattr(row, "rms_uv", float("nan"))) if has_rms else None,
-        }
-        for row in recorded.itertuples(index=False)
-    ]
+    if not routed:
+        recorded = wd.electrodes[wd.electrodes["recorded"].astype(bool)]
+        has_rms = "rms_uv" in recorded.columns
+        routed = [
+            {
+                "electrode_id": int(row.electrode_id),
+                "x_um": float(row.x_um),
+                "y_um": float(row.y_um),
+                "rms_uv": float(getattr(row, "rms_uv", float("nan"))) if has_rms else None,
+            }
+            for row in recorded.itertuples(index=False)
+        ]
+    return sorted(routed, key=lambda entry: (entry["y_um"], entry["x_um"]))
 
 
 def _routed_eid_order(wd: WellData) -> list[int]:
     return [int(r["electrode_id"]) for r in _routed_entries(wd)]
 
 
-def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
-    """Parse a CSV/range string into a sorted list of routed eids.
+def _sort_by_routed_order(order: list[int], ids) -> list[int]:
+    """Order ``ids`` by their position in ``order`` (physical y_um/x_um rank)
+    instead of numeric electrode_id, so selections read spatially rather
+    than by an arbitrary id number.
+    """
+    rank = {eid: i for i, eid in enumerate(order)}
+    return sorted((int(e) for e in ids), key=lambda eid: rank.get(eid, len(order)))
+
+
+def _parse_electrode_id_input(text: str, order: list[int]) -> list[int]:
+    """Parse a CSV/range string into a position-ordered list of routed eids.
 
     Accepts comma- or whitespace-separated tokens; each token is either an
-    integer or an ``a-b`` inclusive range. IDs outside ``valid`` are
+    integer or an ``a-b`` inclusive range. IDs outside ``order`` are
     silently dropped.
     """
+    valid = set(order)
     chosen: set[int] = set()
     for raw in text.replace(",", " ").split():
         token = raw.strip()
@@ -615,7 +629,7 @@ def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
                 continue
             if eid in valid:
                 chosen.add(eid)
-    return sorted(chosen)
+    return _sort_by_routed_order(order, chosen)
 
 
 _PLOT_HEIGHT_PX = 268  # 320px graph - 44 top margin - 8 bottom margin

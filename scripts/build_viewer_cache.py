@@ -19,6 +19,7 @@ Example::
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 from pathlib import Path
 import sys
@@ -51,9 +52,21 @@ def build_cache_for(
     # extra joining here.
     out_dir = cache_root / recording.sample / recording.date / recording.plate / recording.scan / recording.run / well_id
     manifest = out_dir / "manifest.json"
+    # manifest.json is written twice: once right after the heavy Welch/burst
+    # stages (an interim snapshot with no "figures"/"dashboard" keys yet) and
+    # again at the very end once figures + dashboard export finish. Checking
+    # mere existence treated an interrupted run (killed mid dashboard export)
+    # as fully done, permanently skipping it on retry without --force.
     if manifest.exists() and not force:
-        logger.info("skip (cached): %s", out_dir)
-        return out_dir
+        try:
+            manifest_data = json.loads(manifest.read_text())
+            is_complete = "figures" in manifest_data.get("files", {})
+        except (json.JSONDecodeError, OSError):
+            is_complete = False
+        if is_complete:
+            logger.info("skip (cached): %s", out_dir)
+            return out_dir
+        logger.info("resuming incomplete run (heavy stages cached, finishing remaining steps): %s", out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     config = AnalysisConfig(
         data_path=recording.raw_path or "",
@@ -68,6 +81,7 @@ def build_cache_for(
         compute_bursts=compute_bursts,
         export_probe_geometry=export_probe_geometry,
         export_dashboard_data=export_dashboard_data,
+        resume=not force,
     )
     started = perf_counter()
     run_analysis(config)
@@ -91,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
         default=[],
         help="Restrict to specific well ids (e.g., well000); repeatable.",
     )
-    parser.add_argument("--n-jobs", type=int, default=1)
+    parser.add_argument("--n-jobs", type=int, default=-1, help="Worker threads for Welch/band-power (-1 = all cores, default).")
     parser.add_argument("--force", action="store_true", help="Re-run even when manifest.json exists.")
     parser.add_argument("--quiet", action="store_true", help="Disable per-window progress bars.")
     parser.add_argument(
