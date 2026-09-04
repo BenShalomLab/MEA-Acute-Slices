@@ -132,44 +132,31 @@ class LibraryIndex:
         if not root.exists():
             return cls([], mode="raw", root=str(root))
 
+        # Single-file mode: data_root points directly at one .h5 file (any
+        # filename, not just "data.raw.h5"). Bypasses the directory walk
+        # entirely so a folder full of unrelated .h5 files is never scanned --
+        # caller opted into exactly this one recording.
+        if root.is_file():
+            if root.suffix != ".h5":
+                return cls([], mode="raw", root=str(root))
+            parts = _parse_recording_id(root)
+            records = _build_recording_entries(root, parts)
+            return cls(records, mode="raw", root=str(root))
+
         records: list[RecordingEntry] = []
         for run_dir in _iter_run_dirs(root, sample_override=sample_override):
             raw_path = run_dir.path / "data.raw.h5"
             if not raw_path.exists():
                 continue
-            wells_recs = _list_wells_and_recs_from_h5(raw_path)
-            if not wells_recs:
-                continue
-            # Group (well_id, rec_name) pairs by rec_name. Single-rec files
-            # collapse to one RecordingEntry with rec_name=None (legacy layout).
-            # Multi-rec files expand to one RecordingEntry per rec_name with
-            # /{rec_name} appended to run and recording_id so the viewer keys
-            # them distinctly.
-            by_rec: dict[str | None, list[str]] = {}
-            for well_id, rec_name in wells_recs:
-                by_rec.setdefault(rec_name, []).append(well_id)
-            for rec_name, well_ids in by_rec.items():
-                if rec_name is None:
-                    actual_run = run_dir.run
-                    recording_id = run_dir.recording_id
-                else:
-                    actual_run = f"{run_dir.run}/{rec_name}"
-                    recording_id = f"{run_dir.recording_id}/{rec_name}"
-                records.append(
-                    RecordingEntry(
-                        recording_id=recording_id,
-                        sample=run_dir.sample,
-                        date=run_dir.date,
-                        plate=run_dir.plate,
-                        scan=run_dir.scan,
-                        run=actual_run,
-                        raw_path=str(raw_path),
-                        wells=[
-                            WellEntry(well_id=w, rec_name=rec_name, raw_path=str(raw_path))
-                            for w in sorted(well_ids)
-                        ],
-                    )
-                )
+            parts = {
+                "recording_id": run_dir.recording_id,
+                "sample": run_dir.sample,
+                "date": run_dir.date,
+                "plate": run_dir.plate,
+                "scan": run_dir.scan,
+                "run": run_dir.run,
+            }
+            records.extend(_build_recording_entries(raw_path, parts))
         return cls(records, mode="raw", root=str(root))
 
     # -- queries ------------------------------------------------------
@@ -266,24 +253,39 @@ def _parse_recording_id(data_path: Path) -> dict:
     Expected layouts (matching Yuxin_MEA DatasetManager):
       [Sample]/Date/Plate/ScanType/Run/data.raw.h5
       Date/Plate/ScanType/Run/data.raw.h5
+
+    Also tolerates arbitrarily-named .h5 files that don't sit 4 levels below
+    a date directory (e.g. a file dropped directly in a Plate dir) -- the
+    date search scans the whole path rather than assuming a fixed tail
+    length, and missing Scan/Run components fall back to the filename stem
+    so the recording still gets a stable, unique id.
     """
     parts = list(data_path.resolve().parts)
-    if data_path.name == "data.raw.h5":
+    if data_path.suffix == ".h5":
         parts = parts[:-1]
-    # Look for the last 6-digit date directory; that's the most reliable anchor.
+    # Primary: look for a date dir with room for Plate/Scan/Run after it
+    # (skips the last 2 parts, since Scan/Run dirs are often numeric too and
+    # would otherwise false-match the date regex).
     date_idx = None
     for idx in range(len(parts) - 3, -1, -1):
         if DATE_DIR_RE.match(parts[idx]):
             date_idx = idx
             break
-    if date_idx is None or date_idx + 3 >= len(parts):
+    if date_idx is None:
+        # Secondary: shallower layout (e.g. file dropped directly in a Plate
+        # dir, no Scan/Run subdirs) -- scan the whole remaining path.
+        for idx in range(len(parts) - 1, -1, -1):
+            if DATE_DIR_RE.match(parts[idx]):
+                date_idx = idx
+                break
+    if date_idx is None:
         # Fall back: assume the last 4 parts are Date/Plate/Scan/Run.
         date_idx = max(0, len(parts) - 4)
     sample = parts[date_idx - 1] if date_idx > 0 else "unknown"
     date_s = parts[date_idx] if date_idx < len(parts) else "unknown"
     plate = parts[date_idx + 1] if date_idx + 1 < len(parts) else "unknown"
-    scan = parts[date_idx + 2] if date_idx + 2 < len(parts) else "unknown"
-    run = parts[date_idx + 3] if date_idx + 3 < len(parts) else "unknown"
+    scan = parts[date_idx + 2] if date_idx + 2 < len(parts) else data_path.stem
+    run = parts[date_idx + 3] if date_idx + 3 < len(parts) else data_path.stem
     recording_id = f"{sample}/{date_s}/{plate}/{scan}/{run}"
     return {
         "recording_id": recording_id,
@@ -358,6 +360,49 @@ def _iter_run_dirs(root: Path, *, sample_override: str | None) -> Iterator[_RunD
                             scan=scan_dir.name,
                             run=run_dir.name,
                         )
+
+
+def _build_recording_entries(raw_path: Path, parts: dict) -> list["RecordingEntry"]:
+    """Build one RecordingEntry per rec_name found in ``raw_path``.
+
+    Shared by the directory-walk and single-file branches of
+    ``LibraryIndex.from_data_root``. ``parts`` supplies recording_id/sample/
+    date/plate/scan/run (see ``_parse_recording_id``).
+    """
+    wells_recs = _list_wells_and_recs_from_h5(raw_path)
+    if not wells_recs:
+        return []
+    # Group (well_id, rec_name) pairs by rec_name. Single-rec files collapse
+    # to one RecordingEntry with rec_name=None (legacy layout). Multi-rec
+    # files expand to one RecordingEntry per rec_name with /{rec_name}
+    # appended to run and recording_id so the viewer keys them distinctly.
+    by_rec: dict[str | None, list[str]] = {}
+    for well_id, rec_name in wells_recs:
+        by_rec.setdefault(rec_name, []).append(well_id)
+    entries: list[RecordingEntry] = []
+    for rec_name, well_ids in by_rec.items():
+        if rec_name is None:
+            actual_run = parts["run"]
+            recording_id = parts["recording_id"]
+        else:
+            actual_run = f"{parts['run']}/{rec_name}"
+            recording_id = f"{parts['recording_id']}/{rec_name}"
+        entries.append(
+            RecordingEntry(
+                recording_id=recording_id,
+                sample=parts["sample"],
+                date=parts["date"],
+                plate=parts["plate"],
+                scan=parts["scan"],
+                run=actual_run,
+                raw_path=str(raw_path),
+                wells=[
+                    WellEntry(well_id=w, rec_name=rec_name, raw_path=str(raw_path))
+                    for w in sorted(well_ids)
+                ],
+            )
+        )
+    return entries
 
 
 def _list_wells_and_recs_from_h5(raw_path: Path) -> list[tuple[str, str | None]]:

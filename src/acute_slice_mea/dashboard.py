@@ -57,6 +57,28 @@ def _recorded_electrodes(electrodes: pd.DataFrame) -> pd.DataFrame:
     return recorded.sort_values("electrode_id")
 
 
+def _read_decimated_all_channels(recording, channel_ids, num_samples, step, chunk_frames):
+    """Read + decimate ALL requested channels in one pass, in time chunks.
+
+    The underlying recording applies a global common reference (median
+    across ALL channels), so requesting even a single channel forces
+    SpikeInterface to read/filter every channel internally anyway. Calling
+    this once per signal (instead of once per electrode per signal) turns
+    ~n_electrodes full-duration multi-channel reads into 1.
+    """
+    chunks = []
+    for chunk_start in range(0, num_samples, chunk_frames):
+        chunk_end = min(num_samples, chunk_start + chunk_frames)
+        traces = get_traces_safe(recording, chunk_start, chunk_end, channel_ids)
+        offset = (-chunk_start) % step
+        local_idxs = np.arange(offset, chunk_end - chunk_start, step)
+        if local_idxs.size:
+            chunks.append(np.asarray(traces[local_idxs, :], dtype=np.float32))
+    if chunks:
+        return np.concatenate(chunks, axis=0)
+    return np.empty((0, len(channel_ids)), dtype=np.float32)
+
+
 def export_dashboard_data(
     dashboard_dir,
     *,
@@ -83,13 +105,16 @@ def export_dashboard_data(
     sample_frames = np.arange(0, num_samples, step)
     time_sec = sample_frames / fs
 
+    channel_ids_all = recorded["channel_id"].tolist()
+    chunk_frames = max(step, int(round(5.0 * fs)))
+
     trace_index: dict[str, dict[str, str]] = {signal: {} for signal in signals}
     for signal in signals:
         recording = recordings[signal]
         signal_dir = traces_dir / signal
-        for row in recorded.itertuples(index=False):
-            traces = get_traces_safe(recording, 0, num_samples, [row.channel_id])
-            values = np.asarray(traces[::step, 0], dtype=float)
+        decimated = _read_decimated_all_channels(recording, channel_ids_all, num_samples, step, chunk_frames)
+        for col_idx, row in enumerate(recorded.itertuples(index=False)):
+            values = np.asarray(decimated[:, col_idx], dtype=float)
             payload = {
                 "signal": signal,
                 "signal_label": SIGNAL_LABELS.get(signal, signal),

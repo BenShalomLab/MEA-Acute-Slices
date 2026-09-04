@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from math import ceil
+import sys
+from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -162,10 +165,16 @@ def compute_lfp_band_power_over_time(
             ]
         )
 
-    def compute_window_chunk(win_start, chunk_electrode_ids, chunk_channel_ids):
-        win_end = win_start + window_frames
-        traces = get_traces_safe(recording, win_start, win_end, chunk_channel_ids, return_scaled=return_scaled)
-        freqs, psd = signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
+    # Chunk boundaries as column-index ranges into the full-channel traces
+    # array (chunks are consecutive slices of channel_ids, so this lines up).
+    chunk_bounds = []
+    col = 0
+    for chunk_electrode_ids, chunk_channel_ids in chunks:
+        chunk_bounds.append((col, col + len(chunk_channel_ids), chunk_electrode_ids, chunk_channel_ids))
+        col += len(chunk_channel_ids)
+
+    def compute_window_chunk(traces_slice, win_start, win_end, chunk_electrode_ids, chunk_channel_ids):
+        freqs, psd = signal.welch(traces_slice, fs=fs, nperseg=nperseg, axis=0)
         masks = _band_masks(freqs, bands)
         center_time_sec = (win_start + win_end) / (2 * fs)
         chunk_rows = []
@@ -189,23 +198,54 @@ def compute_lfp_band_power_over_time(
         return chunk_rows
 
     window_starts = range(start_frame, last_start + 1, step_frames)
+    total_windows = ((last_start - start_frame) // step_frames) + 1
     if progress:
-        total_windows = ((last_start - start_frame) // step_frames) + 1
         window_starts = _progress_iter(window_starts, total=total_windows, desc="LFP band power")
 
-    for win_start in window_starts:
-        if n_jobs == 1:
-            chunk_results = [
-                compute_window_chunk(win_start, chunk_electrode_ids, chunk_channel_ids)
-                for chunk_electrode_ids, chunk_channel_ids in chunks
-            ]
-        else:
-            chunk_results = Parallel(n_jobs=n_jobs, backend="threading")(
-                delayed(compute_window_chunk)(win_start, chunk_electrode_ids, chunk_channel_ids)
-                for chunk_electrode_ids, chunk_channel_ids in chunks
-            )
-        for chunk_rows in chunk_results:
-            rows.extend(chunk_rows)
+    # Plain, non-carriage-return heartbeat printed alongside the tqdm bar.
+    # tqdm's \r redraw can end up buffered/invisible depending on how the
+    # process is launched (e.g. through `conda run`), so this guarantees at
+    # least one real newline-terminated, flushed line every few windows.
+    heartbeat_started = perf_counter()
+    heartbeat_every = max(1, total_windows // 20) if progress else 0
+
+    # Open ONE worker pool for the whole window loop instead of spinning up
+    # and tearing down a new thread pool on every single window (57+ times
+    # for a typical recording). Pool startup/teardown was the dominant cost
+    # -- with per-window chunks this small, that overhead was swamping
+    # whatever parallel speedup the threading backend could offer, so CPU
+    # usage stayed effectively single-core despite n_jobs>1.
+    parallel_ctx = Parallel(n_jobs=n_jobs, backend="threading") if n_jobs != 1 else None
+    with parallel_ctx if parallel_ctx is not None else nullcontext():
+        for window_idx, win_start in enumerate(window_starts):
+            win_end = win_start + window_frames
+            # Read the full channel set ONCE per window. The underlying
+            # recording applies a global common reference (median across ALL
+            # channels), so requesting even a small channel subset forces
+            # SpikeInterface to read and filter every channel internally
+            # anyway -- chunking the *read* by channel (as opposed to just
+            # the compute) multiplies I/O and peak memory by n_jobs for no
+            # benefit, and OOM-kills at n_jobs>1.
+            traces_full = get_traces_safe(recording, win_start, win_end, channel_ids, return_scaled=return_scaled)
+            if n_jobs == 1:
+                chunk_results = [
+                    compute_window_chunk(traces_full[:, start:end], win_start, win_end, chunk_electrode_ids, chunk_channel_ids)
+                    for start, end, chunk_electrode_ids, chunk_channel_ids in chunk_bounds
+                ]
+            else:
+                chunk_results = parallel_ctx(
+                    delayed(compute_window_chunk)(traces_full[:, start:end], win_start, win_end, chunk_electrode_ids, chunk_channel_ids)
+                    for start, end, chunk_electrode_ids, chunk_channel_ids in chunk_bounds
+                )
+            for chunk_rows in chunk_results:
+                rows.extend(chunk_rows)
+            if heartbeat_every and (window_idx + 1) % heartbeat_every == 0:
+                elapsed = perf_counter() - heartbeat_started
+                print(
+                    f"  [+{elapsed:6.1f}s] LFP band power: window {window_idx + 1}/{total_windows}",
+                    file=sys.stderr,
+                    flush=True,
+                )
     return pd.DataFrame(rows)
 
 
@@ -232,19 +272,31 @@ def compute_welch_spectrum_summary(
     nperseg = max(1, min(int(round(float(welch_segment_sec) * fs)), end_frame))
     chunks = _channel_chunks(range(len(channel_ids)), channel_ids, n_jobs, channel_chunk_size)
 
-    def compute_spectrum_chunk(chunk_channel_ids):
-        traces = get_traces_safe(recording, 0, end_frame, chunk_channel_ids, return_scaled=return_scaled)
-        return signal.welch(traces, fs=fs, nperseg=nperseg, axis=0)
+    # Read the full channel set ONCE. The underlying recording applies a
+    # global common reference (median across ALL channels), so requesting
+    # even a small channel subset forces SpikeInterface to read/filter every
+    # channel internally anyway -- chunking the *read* by channel multiplies
+    # I/O and peak memory by n_jobs for no benefit, and can OOM at n_jobs>1.
+    traces_full = get_traces_safe(recording, 0, end_frame, channel_ids, return_scaled=return_scaled)
 
-    chunk_iter = chunks
+    chunk_bounds = []
+    col = 0
+    for _, chunk_channel_ids in chunks:
+        chunk_bounds.append((col, col + len(chunk_channel_ids)))
+        col += len(chunk_channel_ids)
+
+    def compute_spectrum_chunk(traces_slice):
+        return signal.welch(traces_slice, fs=fs, nperseg=nperseg, axis=0)
+
+    chunk_iter = chunk_bounds
     if progress:
-        chunk_iter = _progress_iter(chunk_iter, total=len(chunks), desc="Welch spectrum")
+        chunk_iter = _progress_iter(chunk_iter, total=len(chunk_bounds), desc="Welch spectrum")
 
     if n_jobs == 1:
-        chunk_results = [compute_spectrum_chunk(chunk_channel_ids) for _, chunk_channel_ids in chunk_iter]
+        chunk_results = [compute_spectrum_chunk(traces_full[:, start:end]) for start, end in chunk_iter]
     else:
         chunk_results = Parallel(n_jobs=n_jobs, backend="threading")(
-            delayed(compute_spectrum_chunk)(chunk_channel_ids) for _, chunk_channel_ids in chunk_iter
+            delayed(compute_spectrum_chunk)(traces_full[:, start:end]) for start, end in chunk_iter
         )
     freqs = chunk_results[0][0]
     psd = np.concatenate([chunk_psd for _, chunk_psd in chunk_results], axis=1)

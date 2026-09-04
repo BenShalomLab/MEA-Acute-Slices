@@ -301,7 +301,7 @@ def register_all(app, library: LibraryIndex) -> None:
             # event on figure replacement) must not wipe the current selection —
             # the "None" quick-select chip is the explicit way to clear.
             raise PreventUpdate
-        return sorted(set(chosen))
+        return _sort_by_routed_order(order, set(chosen))
 
     @app.callback(
         Output("selected-channels", "data", allow_duplicate=True),
@@ -340,7 +340,7 @@ def register_all(app, library: LibraryIndex) -> None:
             current_set.discard(eid)
         else:
             current_set.add(eid)
-        return sorted(current_set)
+        return _sort_by_routed_order(order, current_set)
 
     @app.callback(
         Output("selected-channels", "data", allow_duplicate=True),
@@ -361,8 +361,8 @@ def register_all(app, library: LibraryIndex) -> None:
         wd = _well_data(recording_id, well_id)
         if wd is None:
             raise PreventUpdate
-        valid = set(wd.routed_electrode_ids())
-        if not valid:
+        order = wd.routed_electrode_ids()
+        if not order:
             raise PreventUpdate
         channel_to_eid = {cid: eid for eid, cid in wd.eid_to_channel.items()}
         resolved_tokens = []
@@ -572,6 +572,10 @@ def _routed_entries(wd: WellData) -> list[dict]:
     """Deterministic routed-electrode list shared by figure build and
     selection-event lookup. Falls back to electrodes.csv when probe.json
     is missing so both callers stay in lockstep on the eid order.
+
+    Sorted by physical (y_um, x_um) position rather than source order, so
+    everything downstream (probe-map point order, click/lasso hit-testing,
+    and by extension the trace stack) reads top-to-bottom on the chip.
     """
     routed = (wd.probe or {}).get("routed") or []
     if routed:
@@ -603,9 +607,10 @@ def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
     """Parse a CSV/range string into a sorted list of routed eids.
 
     Accepts comma- or whitespace-separated tokens; each token is either an
-    integer or an ``a-b`` inclusive range. IDs outside ``valid`` are
+    integer or an ``a-b`` inclusive range. IDs outside ``order`` are
     silently dropped.
     """
+    valid = set(order)
     chosen: set[int] = set()
     for raw in text.replace(",", " ").split():
         token = raw.strip()
@@ -630,7 +635,7 @@ def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
                 continue
             if eid in valid:
                 chosen.add(eid)
-    return sorted(chosen)
+    return _sort_by_routed_order(order, chosen)
 
 
 _PLOT_HEIGHT_PX = 268  # 320px graph - 44 top margin - 8 bottom margin
