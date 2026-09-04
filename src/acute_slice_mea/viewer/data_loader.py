@@ -155,6 +155,11 @@ class WellData:
         recorded = recorded.sort_values(["y_um", "x_um"])
         return recorded["electrode_id"].astype(int).tolist()
 
+    @property
+    def eid_to_channel(self) -> dict[int, str]:
+        """electrode_id -> raw SpikeInterface channel_id string (routed only)."""
+        return self._eid_to_channel
+
     def signals(self) -> list[str]:
         if self.dashboard_manifest is None:
             return []
