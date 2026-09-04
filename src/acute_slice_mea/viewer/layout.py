@@ -371,7 +371,7 @@ def _channel_picker() -> html.Div:
                 id="electrode-id-entry",
                 type="text",
                 debounce=True,
-                placeholder="IDs / ranges, e.g. 500-520, 550, 600-610  (Enter to apply)",
+                placeholder="Electrode IDs/ranges e.g. 500-520, 600  ·  or c675 for a raw channel_id",
                 className="chgrid-id-entry",
                 style={"width": "100%", "marginTop": "6px"},
             ),

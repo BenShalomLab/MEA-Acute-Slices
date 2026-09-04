@@ -353,7 +353,9 @@ def register_all(app, library: LibraryIndex) -> None:
     def on_electrode_id_entry(_submits, text, recording_id, well_id):
         # Always-works fallback: paste CSV with optional ranges, e.g.
         # "500-520, 550, 600-610". IDs outside the routed set are silently
-        # dropped so pasted over-broad lists still work.
+        # dropped so pasted over-broad lists still work. A token prefixed
+        # "c" (e.g. "c675") is a raw SpikeInterface channel_id instead of
+        # an electrode_id — resolved via electrodes.csv before parsing.
         if not text or not text.strip():
             raise PreventUpdate
         wd = _well_data(recording_id, well_id)
@@ -362,7 +364,14 @@ def register_all(app, library: LibraryIndex) -> None:
         valid = set(wd.routed_electrode_ids())
         if not valid:
             raise PreventUpdate
-        chosen = _parse_electrode_id_input(text, valid)
+        channel_to_eid = {cid: eid for eid, cid in wd.eid_to_channel.items()}
+        resolved_tokens = []
+        for token in text.replace(",", " ").split():
+            if token[:1].lower() == "c" and token[1:] in channel_to_eid:
+                resolved_tokens.append(str(channel_to_eid[token[1:]]))
+            else:
+                resolved_tokens.append(token)
+        chosen = _parse_electrode_id_input(" ".join(resolved_tokens), valid)
         if not chosen:
             raise PreventUpdate
         return chosen
@@ -572,6 +581,7 @@ def _routed_entries(wd: WellData) -> list[dict]:
     return [
         {
             "electrode_id": int(row.electrode_id),
+            "channel_id": wd.eid_to_channel.get(int(row.electrode_id)),
             "x_um": float(row.x_um),
             "y_um": float(row.y_um),
             "rms_uv": float(getattr(row, "rms_uv", float("nan"))) if has_rms else None,
@@ -582,6 +592,11 @@ def _routed_entries(wd: WellData) -> list[dict]:
 
 def _routed_eid_order(wd: WellData) -> list[int]:
     return [int(r["electrode_id"]) for r in _routed_entries(wd)]
+
+
+def _electrode_trace_label(wd: WellData, eid: int) -> str:
+    cid = wd.eid_to_channel.get(int(eid))
+    return f"E{eid} · ch{cid}" if cid is not None else f"E{eid}"
 
 
 def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
@@ -641,12 +656,13 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
 
     selected_set = set(int(eid) for eid in selected_channels)
 
-    xs, ys, custom, rms_values = [], [], [], []
+    xs, ys, custom, rms_values, channel_labels = [], [], [], [], []
     for entry in routed:
         eid = int(entry["electrode_id"])
         xs.append(entry["x_um"])
         ys.append(entry["y_um"])
         custom.append(eid)
+        channel_labels.append(str(entry.get("channel_id") or "—"))
         rms = entry.get("rms_uv")
         rms_values.append(0.0 if rms is None else float(rms))
 
@@ -705,12 +721,12 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
             ),
         )
         hovertemplate = (
-            "E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm"
+            "E%{customdata} · ch%{text}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm"
             "<br>RMS=%{marker.color:.1f} µV<extra></extra>"
         )
     else:
         marker_kwargs.update(color="#cfcabc")
-        hovertemplate = "E%{customdata}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>"
+        hovertemplate = "E%{customdata} · ch%{text}<br>x=%{x:.0f} µm<br>y=%{y:.0f} µm<extra></extra>"
 
     # SVG Scatter (not Scattergl) — at ~hundreds of routed electrodes the
     # SVG cost is fine, and SVG hit-testing for lasso/box select is reliable
@@ -720,6 +736,7 @@ def _build_probe_map_figure(wd: WellData | None, selected_channels: list[int]) -
         go.Scatter(
             x=xs, y=ys,
             customdata=custom,
+            text=channel_labels,
             mode="markers",
             name="routed",
             marker=marker_kwargs,
@@ -853,7 +870,7 @@ def _build_traces_figure(
             go.Scattergl(
                 mode="lines",
                 line=dict(color=TRACE_COLOR, width=1),
-                name=f"E{payload['electrode_id']}",
+                name=_electrode_trace_label(wd, payload["electrode_id"]),
             ),
             hf_x=payload["time_sec"],
             hf_y=payload["value"] * gain + offset,
@@ -892,7 +909,7 @@ def _build_traces_figure(
             zeroline=False,
             tickmode="array",
             tickvals=label_positions,
-            ticktext=[f"E{p['electrode_id']}" for p in payloads],
+            ticktext=[_electrode_trace_label(wd, p["electrode_id"]) for p in payloads],
             tickfont=dict(family="IBM Plex Mono", size=10, color="#1a1916"),
         ),
         hovermode="closest",
