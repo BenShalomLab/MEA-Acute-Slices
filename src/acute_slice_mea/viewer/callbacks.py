@@ -371,7 +371,7 @@ def register_all(app, library: LibraryIndex) -> None:
                 resolved_tokens.append(str(channel_to_eid[token[1:]]))
             else:
                 resolved_tokens.append(token)
-        chosen = _parse_electrode_id_input(" ".join(resolved_tokens), valid)
+        chosen = _parse_electrode_id_input(" ".join(resolved_tokens), order)
         if not chosen:
             raise PreventUpdate
         return chosen
@@ -603,8 +603,13 @@ def _electrode_trace_label(wd: WellData, eid: int) -> str:
     return f"E{eid} · ch{cid}" if cid is not None else f"E{eid}"
 
 
-def _parse_electrode_id_input(text: str, valid: set[int]) -> list[int]:
-    """Parse a CSV/range string into a sorted list of routed eids.
+def _sort_by_routed_order(order: list[int], chosen: set[int]) -> list[int]:
+    """Sort a set of electrode ids by their position in ``order``."""
+    return [eid for eid in order if eid in chosen]
+
+
+def _parse_electrode_id_input(text: str, order: list[int]) -> list[int]:
+    """Parse a CSV/range string into a list of routed eids, in ``order``.
 
     Accepts comma- or whitespace-separated tokens; each token is either an
     integer or an ``a-b`` inclusive range. IDs outside ``order`` are
