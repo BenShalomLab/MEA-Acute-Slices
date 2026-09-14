@@ -70,6 +70,20 @@ def _make_stub_cache(tmp_path: Path) -> Path:
     return cache
 
 
+def test_routed_electrode_ids_sort_high_y_then_low_x(tmp_path):
+    cache = _make_stub_cache(tmp_path)
+    wd = WellData.load(cache)
+    wd.electrodes = pd.DataFrame(
+        [
+            {"electrode_id": 10, "channel_id": "a", "x_um": 0.0, "y_um": 0.0, "recorded": True, "rms_uv": 1.0},
+            {"electrode_id": 11, "channel_id": "b", "x_um": 17.5, "y_um": 0.0, "recorded": True, "rms_uv": 1.0},
+            {"electrode_id": 20, "channel_id": "c", "x_um": 0.0, "y_um": 17.5, "recorded": True, "rms_uv": 1.0},
+            {"electrode_id": 21, "channel_id": "d", "x_um": 17.5, "y_um": 17.5, "recorded": True, "rms_uv": 1.0},
+        ]
+    )
+    assert wd.routed_electrode_ids() == [20, 21, 10, 11]
+
+
 def test_well_data_loads_summary_electrodes_bursts_and_probe(tmp_path):
     cache = _make_stub_cache(tmp_path)
     wd = WellData.load(cache)

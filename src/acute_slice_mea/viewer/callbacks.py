@@ -568,21 +568,26 @@ def register_all(app, library: LibraryIndex) -> None:
 # =============================================================================
 
 
+def _spatial_sort_key(entry: dict) -> tuple[float, float]:
+    """Chip reading order: high y (top row) first, then low x (left column)."""
+    return (-float(entry["y_um"]), float(entry["x_um"]))
+
+
 def _routed_entries(wd: WellData) -> list[dict]:
     """Deterministic routed-electrode list shared by figure build and
     selection-event lookup. Falls back to electrodes.csv when probe.json
     is missing so both callers stay in lockstep on the eid order.
 
-    Sorted by physical (y_um, x_um) position rather than source order, so
-    everything downstream (probe-map point order, click/lasso hit-testing,
-    and by extension the trace stack) reads top-to-bottom on the chip.
+    Sorted by physical position rather than electrode_id: high ``y_um``
+    (top of the inverted probe map) then low ``x_um`` (left). Lasso/box
+    selection and the trace stack both follow this row-then-column order.
     """
     routed = (wd.probe or {}).get("routed") or []
     if routed:
-        return list(routed)
+        return sorted(routed, key=_spatial_sort_key)
     recorded = wd.electrodes[wd.electrodes["recorded"].astype(bool)]
     has_rms = "rms_uv" in recorded.columns
-    return [
+    entries = [
         {
             "electrode_id": int(row.electrode_id),
             "channel_id": wd.eid_to_channel.get(int(row.electrode_id)),
@@ -592,6 +597,7 @@ def _routed_entries(wd: WellData) -> list[dict]:
         }
         for row in recorded.itertuples(index=False)
     ]
+    return sorted(entries, key=_spatial_sort_key)
 
 
 def _routed_eid_order(wd: WellData) -> list[int]:
