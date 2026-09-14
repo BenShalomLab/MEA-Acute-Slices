@@ -7,9 +7,17 @@ can be tested directly.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
+import pandas as pd
 import pytest
 
-from acute_slice_mea.viewer.callbacks import _parse_electrode_id_input, _rms_clip_range
+from acute_slice_mea.viewer.callbacks import (
+    _parse_electrode_id_input,
+    _rms_clip_range,
+    _routed_eid_order,
+    _sort_by_routed_order,
+)
 
 
 VALID = set(range(1, 1001))  # routed-electrode set used in tests
@@ -62,6 +70,43 @@ class TestParseElectrodeIdInput:
         # All inputs outside the routed set → empty result (callback uses this
         # to PreventUpdate rather than wiping the current selection).
         assert _parse_electrode_id_input("9999, 8888-8890", VALID) == []
+
+
+def _stub_well(*, probe_routed=None, electrodes=None):
+    if electrodes is None:
+        electrodes = pd.DataFrame(
+            columns=["electrode_id", "channel_id", "x_um", "y_um", "recorded", "rms_uv"]
+        )
+    return SimpleNamespace(
+        probe={"routed": probe_routed or []},
+        electrodes=electrodes,
+        eid_to_channel={},
+    )
+
+
+class TestSpatialSelectionOrder:
+    def test_lasso_order_is_high_y_then_low_x(self):
+        # Four corners in electrode_id order (bottom-left first if y=0 is bottom).
+        routed = [
+            {"electrode_id": 10, "x_um": 0.0, "y_um": 0.0},
+            {"electrode_id": 11, "x_um": 17.5, "y_um": 0.0},
+            {"electrode_id": 20, "x_um": 0.0, "y_um": 17.5},
+            {"electrode_id": 21, "x_um": 17.5, "y_um": 17.5},
+        ]
+        order = _routed_eid_order(_stub_well(probe_routed=routed))
+        assert order == [20, 21, 10, 11]
+        # Same as a lasso that returns ids in arbitrary (numeric) order.
+        assert _sort_by_routed_order(order, {11, 20, 10}) == [20, 10, 11]
+
+    def test_csv_fallback_uses_the_same_spatial_order(self):
+        electrodes = pd.DataFrame(
+            [
+                {"electrode_id": 10, "channel_id": "a", "x_um": 0.0, "y_um": 0.0, "recorded": True, "rms_uv": 1.0},
+                {"electrode_id": 21, "channel_id": "d", "x_um": 17.5, "y_um": 17.5, "recorded": True, "rms_uv": 1.0},
+                {"electrode_id": 20, "channel_id": "c", "x_um": 0.0, "y_um": 17.5, "recorded": True, "rms_uv": 1.0},
+            ]
+        )
+        assert _routed_eid_order(_stub_well(electrodes=electrodes)) == [20, 21, 10]
 
 
 class TestRmsClipRange:

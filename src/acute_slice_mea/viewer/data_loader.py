@@ -148,11 +148,10 @@ class WellData:
         return {int(eid): float(rms) for eid, rms in zip(rows["electrode_id"], rows["rms_uv"])}
 
     def routed_electrode_ids(self) -> list[int]:
-        # Ordered by physical (y_um, x_um) position, not electrode_id, so
-        # "All routed" / "Every 8th" quick-selects and validity checks read
-        # top-to-bottom on the chip rather than jumping by raw id number.
+        # High y_um (top row on the inverted probe map) then low x_um (left),
+        # matching lasso/box-select trace order in the viewer.
         recorded = self.electrodes[self.electrodes["recorded"].astype(bool)]
-        recorded = recorded.sort_values(["y_um", "x_um"])
+        recorded = recorded.sort_values(["y_um", "x_um"], ascending=[False, True])
         return recorded["electrode_id"].astype(int).tolist()
 
     @property
