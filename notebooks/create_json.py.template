@@ -1,0 +1,18 @@
+import json
+from pathlib import Path
+
+# Target directory in your Windows User Home folder (C:\Users\dkhun\.acute_slice_mea)
+config_dir = Path.home() / ".acute_slice_mea"
+config_dir.mkdir(parents=True, exist_ok=True)
+
+paths_data = {
+    "hdf5_plugin_path": r"",
+    "recording_file": r"",
+    "output_dir": r"",
+}
+
+json_path = config_dir / "paths.json"
+with open(json_path, "w") as f:
+    json.dump(paths_data, f, indent=2)
+
+print(f"Created configuration file at: {json_path}")
