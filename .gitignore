@@ -1,4 +1,6 @@
 *.log
+# Ignore local environment scripts with hardcoded paths
+notebooks/create_json.py
 
 # Python caches and build artifacts
 __pycache__/
