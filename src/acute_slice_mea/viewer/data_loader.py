@@ -322,6 +322,19 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
         apply_lfp_common_reference=False,
         apply_spike_common_reference=False,
     )
+    try:
+        recs = prepare_recordings(
+            raw,
+            apply_lfp_common_reference=True,
+            apply_spike_common_reference=True,
+        )
+    except Exception as exc:
+        _dbg.warning("Failed to prepare recordings (%s); falling back to unreferenced", exc)
+        recs = prepare_recordings(
+            raw,
+            apply_lfp_common_reference=False,
+            apply_spike_common_reference=False,
+        )
     _mem("open_prepared  AFTER prepare_recordings (lazy)")
     return recs
 
@@ -358,12 +371,29 @@ def _lazy_lfp_window(
     n_frames = end_frame - start_frame
     total_ch = getattr(recording, 'get_num_channels', lambda: '?')()
     _mem(f"lazy_lfp  BEFORE get_traces  frames={n_frames} n_ch={len(channel_ids)} total_rec_ch={total_ch}")
-    traces = recording.get_traces(
-        start_frame=start_frame,
-        end_frame=end_frame,
-        channel_ids=list(channel_ids),
-        return_scaled=False,
-    )
+    try:
+        traces = recording.get_traces(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            channel_ids=list(channel_ids),
+            return_scaled=True,
+      )
+    except TypeError:
+        # Older SpikeInterface or extractors not accepting return_scaled
+        traces = recording.get_traces(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            channel_ids=list(channel_ids),
+        )
+    except ValueError as exc:
+        # Extractor lacks gain_to_uV / scale metadata
+        _dbg.warning("Recording lacks scaling metadata (%s); falling back to unscaled", exc)
+        traces = recording.get_traces(
+            start_frame=start_frame,
+            end_frame=end_frame,
+            channel_ids=list(channel_ids),
+            return_scaled=False,
+        )
     _mem(f"lazy_lfp  AFTER get_traces   raw_shape={traces.shape} dtype={traces.dtype}")
     traces = np.asarray(traces, dtype=np.float32)
     _mem(f"lazy_lfp  AFTER asarray      shape={traces.shape}")
