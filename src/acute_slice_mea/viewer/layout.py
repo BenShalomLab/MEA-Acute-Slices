@@ -47,6 +47,7 @@ def build_layout(library: LibraryIndex) -> html.Div:
             dcc.Store(id="selected-well-id"),
             dcc.Store(id="selected-channels", data=[]),
             dcc.Store(id="gain", data=1.0),
+            dcc.Store(id="selected-signal", data="lfp"),
             # Bumped whenever the active (recording, well) changes so downstream
             # callbacks can flush their per-well caches.
             dcc.Store(id="well-version", data=0),
@@ -224,9 +225,25 @@ def _control_bar() -> html.Div:
             html.Div(
                 className="ctrl-group",
                 children=[
-                    html.Span("Bandpass", className="ctrl-label"),
-                    html.Span("0.5 – 300 Hz", className="ctrl-readout ctrl-readout-locked"),
-                    html.Span("LFP standard", className="ctrl-hint"),
+                    html.Span("Signal", className="ctrl-label"),
+                    html.Div(
+                        className="seg",
+                        children=[
+                            html.Button(
+                                "LFP",
+                                id={"type": "signal-btn", "signal": "lfp"},
+                                className="seg-btn is-active",
+                                n_clicks=0,
+                            ),
+                            html.Button(
+                                "Raw",
+                                id={"type": "signal-btn", "signal": "raw"},
+                                className="seg-btn",
+                                n_clicks=0,
+                            ),
+                        ],
+                    ),
+                    html.Span("0.5 – 300 Hz", id="signal-readout", className="ctrl-hint"),
                 ],
             ),
             html.Div(className="ctrl-divider"),
