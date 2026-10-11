@@ -57,26 +57,185 @@ def _recorded_electrodes(electrodes: pd.DataFrame) -> pd.DataFrame:
     return recorded.sort_values("electrode_id")
 
 
-def _read_decimated_all_channels(recording, channel_ids, num_samples, step, chunk_frames):
-    """Read + decimate ALL requested channels in one pass, in time chunks.
+def _compute_downsampling_params(
+    num_samples: int,
+    fs: float,
+    max_points_per_electrode: int,
+    target_rate_hz: float | None = None,
+) -> tuple[int, bool]:
+    """Calculate bin size and aggregation mode balanced by recording length.
 
+    Parameters
+    ----------
+    num_samples : int
+        Total frames in the recording.
+    fs : float
+        Sampling frequency (Hz).
+    max_points_per_electrode : int
+        Maximum allowed display points per electrode.
+    target_rate_hz : float | None
+        Optional desired temporal resolution (e.g. 2000 Hz for spikes/raw or
+        1000 Hz for LFP).
+
+    Returns
+    -------
+    bin_size : int
+        Number of raw frames per downsampling bin (>= 1).
+    use_minmax : bool
+        True if Min-Max aggregation is used (when downsampling); False if
+        keeping un-decimated samples.
+    """
+    max_points = max(2, int(max_points_per_electrode))
+    if num_samples <= max_points:
+        return 1, False
+
+    # Min-Max emits up to 2 points per bin (min and max chronologically)
+    max_bins = max(1, max_points // 2)
+
+    if target_rate_hz is not None and target_rate_hz > 0:
+        # Balanced sampling: maintain desired target_rate_hz for shorter
+        # recordings, but scale up bin_size gracefully when duration causes
+        # bin count to exceed max_bins.
+        ideal_bin_size = max(2, int(round(fs / float(target_rate_hz))))
+        if num_samples // ideal_bin_size <= max_bins:
+            return ideal_bin_size, True
+
+    bin_size = max(2, int(np.ceil(num_samples / max_bins)))
+    return bin_size, True
+
+
+def _read_decimated_all_channels(
+    recording,
+    channel_ids: list[str],
+    num_samples: int,
+    fs: float | None = None,
+    bin_size: int = 1,
+    use_minmax: bool = True,
+    chunk_frames_target: int | None = None,
+    step: int | None = None,
+    chunk_frames: int | None = None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Read and aggregate all requested channels in one pass across time chunks.
+
+    Applies Min-Max aggregation (preserving action potentials, burst envelopes,
+    and extrema) or full-resolution slicing across chunk-aligned boundaries.
     The underlying recording applies a global common reference (median
     across ALL channels), so requesting even a single channel forces
     SpikeInterface to read/filter every channel internally anyway. Calling
     this once per signal (instead of once per electrode per signal) turns
     ~n_electrodes full-duration multi-channel reads into 1.
+
+    Returns
+    -------
+    time_sec : np.ndarray
+        1D array of timestamps (seconds).
+    values : np.ndarray
+        2D array of shape (n_points, len(channel_ids)) in physical units.
     """
-    chunks = []
-    for chunk_start in range(0, num_samples, chunk_frames):
-        chunk_end = min(num_samples, chunk_start + chunk_frames)
+    if fs is None:
+        fs = float(recording.get_sampling_frequency())
+
+    # Backwards compatibility: allow passing legacy step and chunk_frames
+    if step is not None and bin_size == 1:
+        bin_size = max(1, int(step))
+        use_minmax = bin_size > 1
+
+    if not channel_ids or num_samples <= 0:
+        return np.empty(0, dtype=np.float64), np.empty((0, len(channel_ids)), dtype=np.float32)
+
+    if not use_minmax or bin_size <= 1:
+        # Full-resolution or unaggregated read
+        chunk_target = chunk_frames or chunk_frames_target or max(1, int(round(5.0 * fs)))
+        all_vals = []
+        all_times = []
+        for chunk_start in range(0, num_samples, chunk_target):
+            chunk_end = min(num_samples, chunk_start + chunk_target)
+            n_chunk = chunk_end - chunk_start
+            traces = get_traces_safe(recording, chunk_start, chunk_end, channel_ids)
+            arr = np.asarray(traces, dtype=np.float32)
+            if arr.ndim == 1:
+                arr = arr[:, np.newaxis]
+            all_vals.append(arr)
+            all_times.append((np.arange(n_chunk, dtype=np.float64) + chunk_start) / fs)
+        if all_vals:
+            return np.concatenate(all_times), np.vstack(all_vals)
+        return np.empty(0, dtype=np.float64), np.empty((0, len(channel_ids)), dtype=np.float32)
+
+    # Min-Max aggregation: align chunk boundaries strictly to bin multiples
+    chunk_target = chunk_frames or chunk_frames_target or max(bin_size, int(round(5.0 * fs)))
+    aligned_chunk_frames = max(bin_size, (chunk_target // bin_size) * bin_size)
+
+    all_times = []
+    all_vals = []
+
+    for chunk_start in range(0, num_samples, aligned_chunk_frames):
+        chunk_end = min(num_samples, chunk_start + aligned_chunk_frames)
+        n_chunk_samples = chunk_end - chunk_start
         traces = get_traces_safe(recording, chunk_start, chunk_end, channel_ids)
-        offset = (-chunk_start) % step
-        local_idxs = np.arange(offset, chunk_end - chunk_start, step)
-        if local_idxs.size:
-            chunks.append(np.asarray(traces[local_idxs, :], dtype=np.float32))
-    if chunks:
-        return np.concatenate(chunks, axis=0)
-    return np.empty((0, len(channel_ids)), dtype=np.float32)
+        arr = np.asarray(traces, dtype=np.float32)
+        if arr.ndim == 1:
+            arr = arr[:, np.newaxis]
+
+        n_full_bins = n_chunk_samples // bin_size
+        rem = n_chunk_samples % bin_size
+
+        if n_full_bins > 0:
+            full_samples = n_full_bins * bin_size
+            reshaped = arr[:full_samples].reshape(n_full_bins, bin_size, len(channel_ids))
+            min_vals = np.min(reshaped, axis=1)
+            max_vals = np.max(reshaped, axis=1)
+            min_idx = np.argmin(reshaped, axis=1)
+            max_idx = np.argmax(reshaped, axis=1)
+
+            order = min_idx <= max_idx
+            first_vals = np.where(order, min_vals, max_vals)
+            second_vals = np.where(order, max_vals, min_vals)
+
+            full_vals = np.empty((n_full_bins * 2, len(channel_ids)), dtype=np.float32)
+            full_vals[0::2, :] = first_vals
+            full_vals[1::2, :] = second_vals
+
+            bin_starts = np.arange(n_full_bins, dtype=np.float64) * bin_size + chunk_start
+            bin_ends = bin_starts + (bin_size - 1)
+            full_times = np.empty(n_full_bins * 2, dtype=np.float64)
+            full_times[0::2] = bin_starts / fs
+            full_times[1::2] = bin_ends / fs
+        else:
+            full_vals = np.empty((0, len(channel_ids)), dtype=np.float32)
+            full_times = np.empty(0, dtype=np.float64)
+            full_samples = 0
+
+        if rem == 1:
+            rem_vals = np.asarray(arr[full_samples:], dtype=np.float32)
+            rem_times = np.array([(chunk_start + full_samples) / fs], dtype=np.float64)
+            chunk_vals = np.vstack([full_vals, rem_vals]) if full_vals.size else rem_vals
+            chunk_times = np.concatenate([full_times, rem_times]) if full_times.size else rem_times
+        elif rem > 1:
+            rem_slice = arr[full_samples:]
+            min_vals_rem = np.min(rem_slice, axis=0)
+            max_vals_rem = np.max(rem_slice, axis=0)
+            min_idx_rem = np.argmin(rem_slice, axis=0)
+            max_idx_rem = np.argmax(rem_slice, axis=0)
+            order_rem = min_idx_rem <= max_idx_rem
+            first_rem = np.where(order_rem, min_vals_rem, max_vals_rem)
+            second_rem = np.where(order_rem, max_vals_rem, min_vals_rem)
+            rem_vals = np.vstack([first_rem, second_rem]).astype(np.float32)
+            rem_times = np.array([
+                (chunk_start + full_samples) / fs,
+                (chunk_start + full_samples + rem - 1) / fs,
+            ], dtype=np.float64)
+            chunk_vals = np.vstack([full_vals, rem_vals]) if full_vals.size else rem_vals
+            chunk_times = np.concatenate([full_times, rem_times]) if full_times.size else rem_times
+        else:
+            chunk_vals = full_vals
+            chunk_times = full_times
+
+        all_vals.append(chunk_vals)
+        all_times.append(chunk_times)
+
+    if all_vals:
+        return np.concatenate(all_times), np.vstack(all_vals)
+    return np.empty(0, dtype=np.float64), np.empty((0, len(channel_ids)), dtype=np.float32)
 
 
 def export_dashboard_data(
@@ -88,6 +247,7 @@ def export_dashboard_data(
     summary: dict,
     max_points_per_electrode=20000,
     include_signals=("raw", "lfp", "spike"),
+    target_rate_hz: float | None = None,
 ) -> dict:
     """Export dashboard data files for lazy loading by a static HTML page."""
     dashboard_dir = Path(dashboard_dir)
@@ -101,18 +261,27 @@ def export_dashboard_data(
     first_recording = recordings[signals[0]]
     fs = float(first_recording.get_sampling_frequency())
     num_samples = int(first_recording.get_num_samples())
-    step = max(1, int(np.ceil(num_samples / int(max_points_per_electrode))))
-    sample_frames = np.arange(0, num_samples, step)
-    time_sec = sample_frames / fs
+    bin_size, use_minmax = _compute_downsampling_params(
+        num_samples=num_samples,
+        fs=fs,
+        max_points_per_electrode=max_points_per_electrode,
+        target_rate_hz=target_rate_hz,
+    )
 
     channel_ids_all = recorded["channel_id"].tolist()
-    chunk_frames = max(step, int(round(5.0 * fs)))
 
     trace_index: dict[str, dict[str, str]] = {signal: {} for signal in signals}
     for signal in signals:
         recording = recordings[signal]
         signal_dir = traces_dir / signal
-        decimated = _read_decimated_all_channels(recording, channel_ids_all, num_samples, step, chunk_frames)
+        time_sec, decimated = _read_decimated_all_channels(
+            recording,
+            channel_ids_all,
+            num_samples=num_samples,
+            fs=fs,
+            bin_size=bin_size,
+            use_minmax=use_minmax,
+        )
         for col_idx, row in enumerate(recorded.itertuples(index=False)):
             values = np.asarray(decimated[:, col_idx], dtype=float)
             payload = {
@@ -122,7 +291,7 @@ def export_dashboard_data(
                 "channel_id": row.channel_id,
                 "x_um": float(row.x_um),
                 "y_um": float(row.y_um),
-                "sample_step": int(step),
+                "sample_step": int(bin_size),
                 "time_sec": time_sec,
                 "value": values,
             }
@@ -143,7 +312,8 @@ def export_dashboard_data(
         "signal_labels": {signal: SIGNAL_LABELS.get(signal, signal) for signal in signals},
         "bands": DEFAULT_LFP_BANDS,
         "max_points_per_electrode": int(max_points_per_electrode),
-        "sample_step": int(step),
+        "sample_step": int(bin_size),
+        "aggregation": "minmax" if use_minmax else "none",
         "electrodes": electrodes_payload,
         "files": {
             "electrodes": "data/electrodes.json",

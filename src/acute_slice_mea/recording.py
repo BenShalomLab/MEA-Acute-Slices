@@ -49,7 +49,7 @@ def prepare_recordings(
         freq_min=lfp_low_hz,
         freq_max=lfp_high_hz,
         margin_ms=lfp_filter_margin_ms,
-        ignore_low_freq_error=lfp_ignore_low_freq_error,
+        #ignore_low_freq_error=lfp_ignore_low_freq_error,
     )
     _mem("prepare_rec  AFTER bandpass LFP (lazy)")
     spike = spre.bandpass_filter(signed, freq_min=spike_low_hz, freq_max=spike_high_hz)
