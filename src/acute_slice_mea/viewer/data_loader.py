@@ -317,11 +317,6 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     _mem("open_prepared  BEFORE load_maxwell")
     raw = load_maxwell_recording(raw_path, well_id, rec_name=rec_name)
     _mem(f"open_prepared  AFTER load_maxwell  n_ch={raw.get_num_channels()} fs={raw.get_sampling_frequency()} n_frames={raw.get_num_frames()}")
-    recs = prepare_recordings(
-        raw,
-        apply_lfp_common_reference=False,
-        apply_spike_common_reference=False,
-    )
     try:
         recs = prepare_recordings(
             raw,

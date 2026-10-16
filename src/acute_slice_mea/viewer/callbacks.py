@@ -421,6 +421,38 @@ def register_all(app, library: LibraryIndex) -> None:
             return max(0.25, gain / 1.4)
         raise PreventUpdate
 
+    # -- signal type toggle --------------------------------------------
+
+    @app.callback(
+        Output("selected-signal", "data"),
+        Input({"type": "signal-btn", "signal": ALL}, "n_clicks"),
+        State("selected-signal", "data"),
+        prevent_initial_call=True,
+    )
+    def on_signal_toggle(_clicks, current_signal):
+        triggered = ctx.triggered_id
+        if not isinstance(triggered, dict):
+            raise PreventUpdate
+        sig = triggered.get("signal")
+        if not sig or sig == current_signal:
+            raise PreventUpdate
+        return sig
+
+    @app.callback(
+        Output({"type": "signal-btn", "signal": ALL}, "className"),
+        Output("signal-readout", "children"),
+        Input("selected-signal", "data"),
+        State({"type": "signal-btn", "signal": ALL}, "id"),
+    )
+    def style_signal_buttons(selected_signal, button_ids):
+        selected_signal = selected_signal or "lfp"
+        classes = [
+            "seg-btn is-active" if b_id.get("signal") == selected_signal else "seg-btn"
+            for b_id in button_ids
+        ]
+        readout = "Unfiltered" if selected_signal == "raw" else "0.5 – 300 Hz"
+        return classes, readout
+
     # -- window preset controls ----------------------------------------
 
     @app.callback(
@@ -458,20 +490,22 @@ def register_all(app, library: LibraryIndex) -> None:
         Input("well-version", "data"),
         Input("selected-channels", "data"),
         Input("gain", "data"),
+        Input("selected-signal", "data"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
         State("traces-graph", "figure"),
     )
-    def render_traces(_version, selected_channels, gain, recording_id, well_id, current_fig):
+    def render_traces(_version, selected_channels, gain, signal, recording_id, well_id, current_fig):
         wd = _well_data(recording_id, well_id)
         selected_channels = selected_channels or []
         gain = float(gain or 1.0)
+        signal = signal or "lfp"
 
         prev_range = None
-        if current_fig and ctx.triggered_id == "gain":
+        if current_fig and ctx.triggered_id in ("gain", "selected-signal"):
             prev_range = current_fig.get("layout", {}).get("xaxis", {}).get("range")
 
-        traces_fig = _build_traces_figure(wd, selected_channels, gain, xaxis_range=prev_range)
+        traces_fig = _build_traces_figure(wd, selected_channels, gain, signal=signal, xaxis_range=prev_range)
 
         n_traces = len(selected_channels)
         n_routed = len(wd.routed_electrode_ids()) if wd is not None else 0
@@ -532,8 +566,9 @@ def register_all(app, library: LibraryIndex) -> None:
         Output("notes-area", "children"),
         Input("selected-recording-id", "data"),
         Input("selected-well-id", "data"),
+        Input("selected-signal", "data"),
     )
-    def update_meta(recording_id, well_id):
+    def update_meta(recording_id, well_id, signal):
         wd = _well_data(recording_id, well_id)
         rec = library.find_recording(recording_id) if recording_id else None
         if wd is None:
@@ -541,12 +576,14 @@ def register_all(app, library: LibraryIndex) -> None:
                 "Sample rate", "Duration", "Routed electrodes", "Filter", "Reference", "Bursts"
             )]
             return placeholder, []
+        filter_label = "None (Raw)" if signal == "raw" else "0.5–300 Hz (LFP)"
+        ref_label = "None" if signal == "raw" else "Common avg."
         meta = [
             _meta_item("Sample rate", f"{wd.sample_rate_hz:.0f} Hz" if wd.sample_rate_hz else "—"),
             _meta_item("Duration", _fmt_time(wd.duration_sec)),
             _meta_item("Routed electrodes", str(len(wd.routed_electrode_ids()))),
-            _meta_item("Filter", "0.5–300 Hz (LFP)", mono=True),
-            _meta_item("Reference", "Common avg.", mono=True),
+            _meta_item("Filter", filter_label, mono=True),
+            _meta_item("Reference", ref_label, mono=True),
             _meta_item("Bursts", str(len(wd.bursts))),
         ]
         notes_children: list = []
@@ -824,11 +861,12 @@ def _build_traces_figure(
     wd: WellData | None,
     selected_channels: list[int],
     gain: float,
+    signal: str = "lfp",
     xaxis_range: list[float] | None = None,
 ) -> go.Figure:
     global _current_resampler
 
-    _mem(f"build_traces  START  n_selected={len(selected_channels)} gain={gain}")
+    _mem(f"build_traces  START  n_selected={len(selected_channels)} gain={gain} signal={signal}")
 
     if wd is None or not selected_channels:
         _current_resampler = None
@@ -853,17 +891,18 @@ def _build_traces_figure(
         return fig
 
     _mem("build_traces  BEFORE traces_for")
-    payloads = wd.traces_for(selected_channels, signal="lfp", decimate=False)
+    payloads = wd.traces_for(selected_channels, signal=signal, decimate=False)
     total_pts = sum(len(p["time_sec"]) for p in payloads)
     _mem(f"build_traces  AFTER traces_for  n_payloads={len(payloads)} total_pts={total_pts}")
 
     if not payloads:
         _current_resampler = None
         fig = go.Figure()
+        sig_label = "raw" if signal == "raw" else "LFP"
         fig.update_layout(
             annotations=[
                 dict(
-                    text="Selected electrodes have no cached LFP traces",
+                    text=f"Selected electrodes have no cached {sig_label} traces",
                     showarrow=False, x=0.5, y=0.5, xref="paper", yref="paper",
                     font=dict(family="IBM Plex Sans", size=12, color="#8a8472"),
                 )
@@ -882,6 +921,9 @@ def _build_traces_figure(
     spacing = 250.0 / max(gain, 0.1)
     for idx, payload in enumerate(payloads):
         offset = -idx * spacing
+        val = payload["value"]
+        if signal == "raw" and len(val) > 0:
+            val = val - np.nanmedian(val)
         fig.add_trace(
             go.Scattergl(
                 mode="lines",
@@ -889,7 +931,7 @@ def _build_traces_figure(
                 name=_electrode_trace_label(wd, payload["electrode_id"]),
             ),
             hf_x=payload["time_sec"],
-            hf_y=payload["value"] * gain + offset,
+            hf_y=val * gain + offset,
         )
 
     for burst in wd.bursts:
