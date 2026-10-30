@@ -41,8 +41,58 @@ BURST_COLOR = "rgba(196, 114, 8, 0.18)"
 _SELECTED_RING_COLOR = "#1a1a1a"
 _SELECTED_RING_WIDTH = 0.5
 _OVER_COLOR = "#b94668"
+HIGH_RES_WINDOW_THRESHOLD_SEC: float = 1.0
 
 _current_resampler: FigureResampler | None = None
+
+
+def _extract_x_range(relayoutdata: dict | None) -> tuple[float, float] | None:
+    if not relayoutdata:
+        return None
+    if "xaxis.range[0]" in relayoutdata and "xaxis.range[1]" in relayoutdata:
+        try:
+            return float(relayoutdata["xaxis.range[0]"]), float(relayoutdata["xaxis.range[1]"])
+        except (ValueError, TypeError):
+            return None
+    if "xaxis.range" in relayoutdata:
+        r = relayoutdata["xaxis.range"]
+        if isinstance(r, (list, tuple)) and len(r) >= 2:
+            try:
+                return float(r[0]), float(r[1])
+            except (ValueError, TypeError):
+                return None
+    return None
+
+
+def _build_high_res_patch(
+    wd: WellData,
+    selected_channels: list[int],
+    gain: float,
+    signal: str,
+    x0: float,
+    x1: float,
+) -> Patch | None:
+    """Build a Dash Patch updating traces with full-resolution (20 kHz) samples."""
+    high_res_payloads = wd.traces_for_window(
+        selected_channels,
+        signal=signal,
+        t0=min(x0, x1),
+        t1=max(x0, x1),
+        full_resolution=True,
+    )
+    if not high_res_payloads:
+        return None
+
+    patch = Patch()
+    spacing = 250.0 / max(gain, 0.1)
+    for idx, payload in enumerate(high_res_payloads):
+        offset = -idx * spacing
+        val = payload["value"]
+        if signal == "raw" and len(val) > 0:
+            val = val - np.nanmedian(val)
+        patch["data"][idx]["x"] = payload["time_sec"]
+        patch["data"][idx]["y"] = val * gain + offset
+    return patch
 
 _proc = psutil.Process(os.getpid())
 _dbg = logging.getLogger("mem_debug")
@@ -461,9 +511,12 @@ def register_all(app, library: LibraryIndex) -> None:
         State("traces-graph", "figure"),
         State("selected-recording-id", "data"),
         State("selected-well-id", "data"),
+        State("selected-channels", "data"),
+        State("gain", "data"),
+        State("selected-signal", "data"),
         prevent_initial_call=True,
     )
-    def on_window_preset(_clicks, current_fig, recording_id, well_id):
+    def on_window_preset(_clicks, current_fig, recording_id, well_id, selected_channels, gain, signal):
         triggered = ctx.triggered_id
         if not isinstance(triggered, dict):
             raise PreventUpdate
@@ -477,6 +530,27 @@ def register_all(app, library: LibraryIndex) -> None:
         a = max(0, b - span)
         patch = Patch()
         patch["layout"]["xaxis"]["range"] = [a, b]
+
+        selected_channels = selected_channels or []
+        gain = float(gain or 1.0)
+        signal = signal or "lfp"
+
+        if span <= HIGH_RES_WINDOW_THRESHOLD_SEC and wd is not None and wd.has_raw_data() and selected_channels:
+            hr_patch = _build_high_res_patch(wd, selected_channels, gain, signal, a, b)
+            if hr_patch is not None:
+                for i in range(len(selected_channels)):
+                    if i < len(hr_patch["data"]):
+                        patch["data"][i]["x"] = hr_patch["data"][i]["x"]
+                        patch["data"][i]["y"] = hr_patch["data"][i]["y"]
+        elif span > HIGH_RES_WINDOW_THRESHOLD_SEC and _current_resampler is not None:
+            simulated_relayout = {"xaxis.range[0]": a, "xaxis.range[1]": b}
+            overview_patch = _current_resampler.construct_update_data_patch(simulated_relayout)
+            if overview_patch is not None:
+                for i in range(len(selected_channels)):
+                    if i < len(overview_patch["data"]):
+                        patch["data"][i]["x"] = overview_patch["data"][i]["x"]
+                        patch["data"][i]["y"] = overview_patch["data"][i]["y"]
+
         return patch
 
     # -- traces figure ------------------------------------------------
@@ -522,12 +596,32 @@ def register_all(app, library: LibraryIndex) -> None:
     @app.callback(
         Output("traces-graph", "figure", allow_duplicate=True),
         Input("traces-graph", "relayoutData"),
+        State("selected-recording-id", "data"),
+        State("selected-well-id", "data"),
+        State("selected-channels", "data"),
+        State("gain", "data"),
+        State("selected-signal", "data"),
         prevent_initial_call=True,
     )
-    def resample_traces(relayoutdata):
+    def resample_traces(relayoutdata, recording_id, well_id, selected_channels, gain, signal):
         global _current_resampler
         if _current_resampler is None:
             raise PreventUpdate
+
+        x_range = _extract_x_range(relayoutdata)
+        wd = _well_data(recording_id, well_id)
+        selected_channels = selected_channels or []
+        gain = float(gain or 1.0)
+        signal = signal or "lfp"
+
+        if x_range is not None and wd is not None and wd.has_raw_data() and selected_channels:
+            x0, x1 = x_range
+            span = abs(x1 - x0)
+            if span <= HIGH_RES_WINDOW_THRESHOLD_SEC:
+                high_res_patch = _build_high_res_patch(wd, selected_channels, gain, signal, min(x0, x1), max(x0, x1))
+                if high_res_patch is not None:
+                    return high_res_patch
+
         return _current_resampler.construct_update_data_patch(relayoutdata)
 
     # -- crumbs + meta strip + notes ---------------------------------
@@ -972,6 +1066,23 @@ def _build_traces_figure(
         ),
         hovermode="closest",
     )
+
+    if xaxis_range and wd.has_raw_data() and abs(x_range[1] - x_range[0]) <= HIGH_RES_WINDOW_THRESHOLD_SEC:
+        hr_payloads = wd.traces_for_window(
+            selected_channels,
+            signal=signal,
+            t0=min(x_range[0], x_range[1]),
+            t1=max(x_range[0], x_range[1]),
+            full_resolution=True,
+        )
+        for idx, hr_p in enumerate(hr_payloads):
+            if idx < len(fig.data):
+                offset = -idx * spacing
+                val = hr_p["value"]
+                if signal == "raw" and len(val) > 0:
+                    val = val - np.nanmedian(val)
+                fig.data[idx].x = hr_p["time_sec"]
+                fig.data[idx].y = val * gain + offset
 
     _current_resampler = fig
     _mem("build_traces  DONE  resampler assigned")

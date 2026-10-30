@@ -136,3 +136,28 @@ class TestRmsClipRange:
         values = [5.0] * 20
         lo, hi = _rms_clip_range(values)
         assert hi > lo
+
+from acute_slice_mea.viewer.callbacks import _extract_x_range, HIGH_RES_WINDOW_THRESHOLD_SEC
+
+
+class TestExtractXRange:
+    def test_none_or_empty(self):
+        assert _extract_x_range(None) is None
+        assert _extract_x_range({}) is None
+
+    def test_autorange(self):
+        assert _extract_x_range({"xaxis.autorange": True}) is None
+
+    def test_range_dict(self):
+        assert _extract_x_range({"xaxis.range[0]": 1.5, "xaxis.range[1]": 2.5}) == (1.5, 2.5)
+
+    def test_range_list(self):
+        assert _extract_x_range({"xaxis.range": [10.0, 11.0]}) == (10.0, 11.0)
+
+    def test_malformed_values(self):
+        assert _extract_x_range({"xaxis.range[0]": "invalid", "xaxis.range[1]": 2.5}) is None
+        assert _extract_x_range({"xaxis.range": [10.0]}) is None
+
+
+def test_high_res_window_threshold_constant():
+    assert HIGH_RES_WINDOW_THRESHOLD_SEC == 1.0
