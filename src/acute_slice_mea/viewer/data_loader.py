@@ -57,6 +57,7 @@ class WellData:
     well_id: str | None = None
     rec_name: str | None = None
     _eid_to_channel: dict[int, str] = field(default_factory=dict)
+    _symmetric_buffer: dict | None = field(default=None, init=False, repr=False)
 
     @classmethod
     def load(cls, cache_dir) -> "WellData":
@@ -163,6 +164,96 @@ class WellData:
         if self.dashboard_manifest is None:
             return []
         return list(self.dashboard_manifest.get("signals", []))
+
+    def has_raw_data(self) -> bool:
+        """True if the source raw recording exists on disk and can be lazily queried."""
+        return self.raw_path is not None and self.raw_path.exists() and self.well_id is not None
+
+    def traces_for_window(
+        self,
+        electrode_ids: Iterable[int],
+        *,
+        signal: str = "lfp",
+        t0: float,
+        t1: float,
+        full_resolution: bool = True,
+        buffer_radius_sec: float = 2.5,
+    ) -> list[dict]:
+        """Fetch high-resolution traces for time window [t0, t1].
+
+        Uses a symmetric in-memory buffer centered around (t0 + t1)/2 to ensure
+        instantaneous slicing (<1 ms) when sliding forward or backward in time.
+        Falls back to pre-exported JSON if raw recording is unavailable.
+        """
+        eid_list = [int(e) for e in electrode_ids]
+        if not eid_list:
+            return []
+
+        if not self.has_raw_data():
+            return self._traces_from_json(
+                eid_list,
+                self._trace_index.get(signal, {}),
+                t0=t0,
+                t1=t1,
+            )
+
+        duration = self.duration_sec or 0.0
+        t_lo = max(0.0, float(t0))
+        t_hi = min(duration, float(t1)) if duration > 0 else float(t1)
+        if t_hi <= t_lo:
+            return []
+
+        buf = self._symmetric_buffer
+        eids_tuple = tuple(sorted(eid_list))
+        if (
+            buf is not None
+            and buf.get("signal") == signal
+            and buf.get("eids") == eids_tuple
+            and buf.get("t_start", 0) <= t_lo
+            and t_hi <= buf.get("t_end", 0)
+        ):
+            return self._slice_payloads(buf["payloads"], t_lo, t_hi)
+
+        center = (t_lo + t_hi) / 2.0
+        window_span = t_hi - t_lo
+        radius = max(buffer_radius_sec, window_span / 2.0 + 2.0)
+        buf_start = max(0.0, center - radius)
+        buf_end = min(duration, center + radius) if duration > 0 else center + radius
+
+        raw_payloads = self._traces_from_recording(
+            eid_list,
+            signal=signal,
+            t0=buf_start,
+            t1=buf_end,
+            decimate=not full_resolution,
+        )
+
+        self._symmetric_buffer = {
+            "signal": signal,
+            "eids": eids_tuple,
+            "t_start": buf_start,
+            "t_end": buf_end,
+            "payloads": raw_payloads,
+        }
+
+        return self._slice_payloads(raw_payloads, t_lo, t_hi)
+
+    @staticmethod
+    def _slice_payloads(payloads: list[dict], t0: float, t1: float) -> list[dict]:
+        sliced = []
+        for p in payloads:
+            t_arr = p["time_sec"]
+            v_arr = p["value"]
+            mask = (t_arr >= t0) & (t_arr <= t1)
+            sliced.append(
+                {
+                    "electrode_id": p["electrode_id"],
+                    "channel_id": p.get("channel_id"),
+                    "time_sec": t_arr[mask],
+                    "value": v_arr[mask],
+                }
+            )
+        return sliced
 
     def traces_for(
         self,
@@ -295,6 +386,7 @@ class WellData:
         return results
 
     def clear_trace_cache(self) -> None:
+        self._symmetric_buffer = None
         _read_trace_json_cached.cache_clear()
         _lazy_lfp_window.cache_clear()
 
@@ -334,7 +426,7 @@ def _open_prepared_recording(raw_path: str, well_id: str, rec_name: str | None):
     return recs
 
 
-@lru_cache(maxsize=8)
+@lru_cache(maxsize=128)
 def _lazy_lfp_window(
     *,
     raw_path: str,
@@ -359,9 +451,12 @@ def _lazy_lfp_window(
     recordings = _open_prepared_recording(raw_path, well_id, rec_name)
     recording = recordings.get(signal) or recordings["lfp"]
     fs = float(recording.get_sampling_frequency())
-    start_frame = max(0, int(round(t_start * fs)))
-    end_frame = max(start_frame + 1, int(round(t_end * fs)))
-    end_frame = min(end_frame, int(recording.get_num_frames()))
+    num_frames = int(recording.get_num_frames())
+    start_frame = max(0, min(num_frames, int(round(t_start * fs))))
+    end_frame = max(start_frame, min(num_frames, int(round(t_end * fs))))
+
+    if start_frame >= end_frame or not channel_ids:
+        return np.empty(0, dtype=np.float64), np.empty((0, len(channel_ids)), dtype=np.float32)
 
     n_frames = end_frame - start_frame
     total_ch = getattr(recording, 'get_num_channels', lambda: '?')()
