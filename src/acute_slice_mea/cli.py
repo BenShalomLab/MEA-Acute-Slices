@@ -30,6 +30,7 @@ def build_parser():
     compute.add_argument("--preview-max-electrodes", type=int, default=16)
     compute.add_argument("--preview-electrode-ids", default=None, help="comma-separated electrode IDs")
     compute.add_argument("--dashboard-max-points-per-electrode", type=int, default=20000)
+    compute.add_argument("--dashboard-target-rate-hz", type=float, default=None, help="Target sampling rate (Hz) for dashboard traces")
     compute.add_argument("--no-dashboard-data", action="store_true")
     compute.add_argument("--n-jobs", type=int, default=1, help="parallel worker count for channel-batched LFP analysis")
     compute.add_argument("--channel-chunk-size", type=int, default=None, help="channels per parallel LFP task")
@@ -59,6 +60,7 @@ def main(argv=None):
             preview_max_electrodes=args.preview_max_electrodes,
             preview_electrode_ids=_parse_electrodes(args.preview_electrode_ids),
             dashboard_max_points_per_electrode=args.dashboard_max_points_per_electrode,
+            dashboard_target_rate_hz=args.dashboard_target_rate_hz,
             export_dashboard_data=not args.no_dashboard_data,
             n_jobs=args.n_jobs,
             channel_chunk_size=args.channel_chunk_size,

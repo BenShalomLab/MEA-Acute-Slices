@@ -49,6 +49,7 @@ class AnalysisConfig:
     preview_max_electrodes: int | None = 16
     preview_electrode_ids: list[int] | None = field(default=None)
     dashboard_max_points_per_electrode: int = 20000
+    dashboard_target_rate_hz: float | None = None
     export_dashboard_data: bool = True
     compute_spectrum: bool = True
     compute_trace_preview: bool = True
@@ -256,6 +257,7 @@ def run_analysis(config: AnalysisConfig) -> dict:
             band_power=band_power,
             summary=summary,
             max_points_per_electrode=config.dashboard_max_points_per_electrode,
+            target_rate_hz=config.dashboard_target_rate_hz,
         )
     _log_verbose(config, "Writing manifest", since=started)
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str))

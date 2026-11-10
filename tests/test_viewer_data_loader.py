@@ -186,3 +186,70 @@ def test_traces_for_falls_back_to_recording_when_dashboard_missing(tmp_path, mon
     assert calls["end_frame"] == 3000
     assert payloads[0]["time_sec"][0] == 1.0
     assert payloads[0]["value"].shape == payloads[0]["time_sec"].shape
+
+
+def test_traces_for_window_symmetric_buffering(tmp_path, monkeypatch):
+    from acute_slice_mea.viewer import data_loader as dl
+
+    cache = tmp_path / "buf_well"
+    cache.mkdir()
+    fake_raw = tmp_path / "data.raw.h5"
+    fake_raw.write_bytes(b"mock")
+    summary = {
+        "well_id": "well000",
+        "data_path": str(fake_raw),
+        "sampling_frequency_hz": 1000.0,
+        "duration_sec": 30.0,
+        "num_recorded_electrodes": 1,
+    }
+    (cache / "summary.json").write_text(json.dumps(summary))
+    pd.DataFrame(
+        [{"electrode_id": 5, "channel_id": 50, "x_um": 0.0, "y_um": 0.0, "recorded": True, "rms_uv": 10.0}]
+    ).to_csv(cache / "electrodes.csv", index=False)
+    (cache / "manifest.json").write_text(json.dumps({
+        "summary": summary,
+        "files": {"summary": str(cache / "summary.json"), "electrodes": str(cache / "electrodes.csv")},
+    }))
+
+    call_count = {"count": 0}
+
+    class _FakeRec:
+        def get_sampling_frequency(self):
+            return 1000.0
+
+        def get_num_frames(self):
+            return 30000
+
+        def get_traces(self, *, start_frame, end_frame, channel_ids, return_scaled=True):
+            call_count["count"] += 1
+            n = end_frame - start_frame
+            return np.ones((n, len(channel_ids)), dtype=np.float32)
+
+    monkeypatch.setattr(dl, "_open_prepared_recording", lambda raw, well, rec: {"lfp": _FakeRec(), "raw": _FakeRec()})
+    dl._lazy_lfp_window.cache_clear()
+
+    wd = dl.WellData.load(cache)
+    assert wd.has_raw_data() is True
+
+    # 1. Initial 1s window [10.0, 11.0] -> fetches symmetric 5s buffer [8.0, 13.0]
+    p1 = wd.traces_for_window([5], signal="lfp", t0=10.0, t1=11.0, full_resolution=True)
+    assert len(p1) == 1
+    assert call_count["count"] == 1
+    assert np.isclose(p1[0]["time_sec"][0], 10.0)
+    assert np.isclose(p1[0]["time_sec"][-1], 11.0)
+    assert len(p1[0]["time_sec"]) == 1001
+
+    # 2. Sliding forward [10.5, 11.5] -> hits buffer in RAM with 0 new calls
+    p2 = wd.traces_for_window([5], signal="lfp", t0=10.5, t1=11.5, full_resolution=True)
+    assert call_count["count"] == 1
+    assert np.isclose(p2[0]["time_sec"][0], 10.5)
+
+    # 3. Sliding backward [9.0, 10.0] -> hits buffer in RAM with 0 new calls
+    p3 = wd.traces_for_window([5], signal="lfp", t0=9.0, t1=10.0, full_resolution=True)
+    assert call_count["count"] == 1
+    assert np.isclose(p3[0]["time_sec"][0], 9.0)
+
+    # 4. Sliding past buffer [14.0, 15.0] -> fetches new symmetric buffer
+    p4 = wd.traces_for_window([5], signal="lfp", t0=14.0, t1=15.0, full_resolution=True)
+    assert call_count["count"] == 2
+    assert np.isclose(p4[0]["time_sec"][0], 14.0)

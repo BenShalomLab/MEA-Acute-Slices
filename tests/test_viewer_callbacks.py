@@ -136,3 +136,68 @@ class TestRmsClipRange:
         values = [5.0] * 20
         lo, hi = _rms_clip_range(values)
         assert hi > lo
+
+from acute_slice_mea.viewer.callbacks import (
+    _compute_preset_range,
+    _extract_x_range,
+    HIGH_RES_WINDOW_THRESHOLD_SEC,
+)
+
+
+class TestExtractXRange:
+    def test_none_or_empty(self):
+        assert _extract_x_range(None) is None
+        assert _extract_x_range({}) is None
+
+    def test_autorange(self):
+        assert _extract_x_range({"xaxis.autorange": True}) is None
+
+    def test_range_dict(self):
+        assert _extract_x_range({"xaxis.range[0]": 1.5, "xaxis.range[1]": 2.5}) == (1.5, 2.5)
+
+    def test_range_list(self):
+        assert _extract_x_range({"xaxis.range": [10.0, 11.0]}) == (10.0, 11.0)
+
+    def test_malformed_values(self):
+        assert _extract_x_range({"xaxis.range[0]": "invalid", "xaxis.range[1]": 2.5}) is None
+        assert _extract_x_range({"xaxis.range": [10.0]}) is None
+
+
+def test_high_res_window_threshold_constant():
+    assert HIGH_RES_WINDOW_THRESHOLD_SEC == 1.0
+
+
+class TestComputePresetRange:
+    def test_normal_centering(self):
+        a, b = _compute_preset_range(5.0, [10.0, 20.0], 60.0)
+        assert a == 12.5
+        assert b == 17.5
+
+    def test_left_boundary_clamp(self):
+        a, b = _compute_preset_range(10.0, [0.0, 4.0], 60.0)
+        assert a == 0.0
+        assert b == 10.0
+
+    def test_right_boundary_clamp(self):
+        a, b = _compute_preset_range(10.0, [56.0, 60.0], 60.0)
+        assert b == 60.0
+        assert a == 50.0
+
+    def test_span_exceeds_duration(self):
+        a, b = _compute_preset_range(100.0, [10.0, 20.0], 60.0)
+        assert a == 0.0
+        assert b == 60.0
+
+    def test_none_or_empty_xrange(self):
+        a, b = _compute_preset_range(5.0, None, 60.0)
+        assert a == 0.0
+        assert b == 5.0
+        a2, b2 = _compute_preset_range(5.0, [], 60.0)
+        assert a2 == 0.0
+        assert b2 == 5.0
+
+    def test_malformed_xrange(self):
+        a, b = _compute_preset_range(5.0, ["invalid", 10.0], 60.0)
+        assert a == 0.0
+        assert b == 5.0
+
